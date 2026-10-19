@@ -1,0 +1,20 @@
+{
+  "peanut_gb.h": "9ebec052f04b7735fec8aed6c158267b684a25b6d75a503355dabb8a393d9587",
+  "examples/sdl2/peanut_sdl.c": "17619c4dc6fce1ad8cb8fb9776ba8abd05b723bcfeeb8be49025e81a7b7e409d",
+  "examples/sdl2/Makefile": "b4e920b844976edeb12f26b8cb9dc071878544af756c935eb5c869f168ba32eb",
+  "examples/common/pokemon_silver_jp.h": "85405734a21f4cea8c7f6b264ff68e93fa158ae5b4f962abeacb57702df79175",
+  "test/Makefile": "0621dd06230b37664a045f2ff36aa9729001e4eee7047d432dd45d63d9362c0f",
+  "test/test.c": "4098a20dea1967f03af0febd423f1c67b6a1bab19ecdb07a14f0c1067196cc95",
+  "test/test_silver_jp.c": "795d8bfbe3ab152616acad9f35a207c7ed6f6482775606388f19cb0d1011a0f8",
+  "test/viewport_tests.h": "dfbc9347e9db91547d66ec86eb562c7b71616825a3266489e20f9c38b14736c4",
+  "test/silver_border_tests.h": "a5169a6cb8a8a26d32d6b29bd39ca913d59bc097176451864fe4bc5ef70ac9f3",
+  "test/silver_connection_tests.h": "aa307431b77b4c4ad37333f2f603be9eb2a1c23a662dcf0dd534f6eff784214f",
+  "test/silver_feature_tests.h": "f415024d26ea94d015dfee05efaa2663eede05c98ce1055fbde516118b181258",
+  "test/silver_frame_tests.h": "c1de28b6fc946b8caed7caf907cae31ccb5d9eb0bcedd6d5f19b224f6447206d",
+  "test/silver_neighbor_tests.h": "f1534a1f2e27f643dcc53178712021519d37eff645e9c2184741bcc983fe5345",
+  "test/silver_npc_lifecycle_tests.h": "d625ce68543e4acf2326e3348ae65f61d56bc278e4cc5ac0b85b19922ff3bfc7",
+  "test/silver_npc_motion_tests.h": "c2be889a20357386a0a90d571c2ac6c058d18adf0aab80369e5e6aacea5d13f8",
+  "test/silver_npc_policy_tests.h": "250f1b9a74b1c8ccc0ed29937891537523336d178a877bd5b1ec7935d89d5fa2",
+  "test/silver_npc_wrap_tests.h": "d9a61376134dfe1c41ae8b647201a93d6284c3ef2225d448b5f3a68395873890",
+  "test/silver_sprite_tests.h": "9ed75740383d8e5af01a133be069573d55cffc3c2e42fed2ac76cd842914c8fd"
+}

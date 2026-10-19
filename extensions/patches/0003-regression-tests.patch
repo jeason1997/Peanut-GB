@@ -1,0 +1,1519 @@
+diff --git a/test/Makefile b/test/Makefile
+--- a/test/Makefile
++++ b/test/Makefile
+@@ -3,11 +3,13 @@
+ override CFLAGS += $(OPT) -Wall -Wextra
+ 
+ all: test test_so
++test.o: test.c viewport_tests.h ../peanut_gb.h
++
+ test: test.o
+ 	$(CC) $< -o $@ $(CFLAGS)
+ 
+-test_so: test.c peanut_gb.o
+-	$(CC) $^ -o $@ -DPEANUT_GB_HEADER_ONLY $(CFLAGS)
++test_so: test.c peanut_gb.o viewport_tests.h
++	$(CC) test.c peanut_gb.o -o $@ -DPEANUT_GB_HEADER_ONLY $(CFLAGS)
+ 
+ test_external_rom: test_external_rom.c
+ 	$(CC) $^ -o $@ $(CFLAGS)
+@@ -16,3 +18,7 @@
+ 	cp ../peanut_gb.h ./peanut_gb.c
+ 	$(CC) -c peanut_gb.c -o $@ $(CFLAGS)
+ 	$(CC) -c peanut_gb.c -S -o $@.S $(CFLAGS)
++
++# Optional, requires an exact JP Silver Rev 1 ROM and an outdoor save.
++test_silver_jp: test_silver_jp.c silver_sprite_tests.h silver_frame_tests.h silver_npc_lifecycle_tests.h silver_npc_policy_tests.h silver_npc_wrap_tests.h silver_connection_tests.h silver_npc_motion_tests.h silver_border_tests.h silver_neighbor_tests.h silver_feature_tests.h ../peanut_gb.h ../examples/common/pokemon_silver_jp.h ../extensions/games/pokemon_silver_jp.h ../extensions/include/gx_gb_view.h
++	$(CC) test_silver_jp.c -o $@ $(CFLAGS)
+diff --git a/test/test.c b/test/test.c
+--- a/test/test.c
++++ b/test/test.c
+@@ -206,10 +206,13 @@
+ 	}
+ }
+ 
++#include "viewport_tests.h"
++
+ int main(void)
+ {
+ 	lrun("cpu_inst blarrg tests    ", test_cpu_inst);
+ 	lrun("instr_timing blarrg tests", test_instr_timing);
+ 	lrun("dmg-acid2 lcd test     ", test_dmg_acid2);
++	lrun("viewport pixels/timing ", test_viewport);
+ 	return lfails != 0;
+ }
+diff --git a/test/test_silver_jp.c b/test/test_silver_jp.c
+new file mode 100644
+--- /dev/null
++++ b/test/test_silver_jp.c
+@@ -0,0 +1,291 @@
++/* Optional integration test. Requires the user's exact JP Silver Rev 1 ROM
++ * and a save in an outdoor map. Neither is modified or included in the repo.
++ * Usage: ./test_silver_jp ROM SAVE [screenshot-directory | --scene-check]
++ */
++#define ENABLE_SOUND 0
++#include "../peanut_gb.h"
++#include "../examples/common/pokemon_silver_jp.h"
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++struct silver_test
++{
++	const uint8_t *rom;
++	uint8_t ram[32768], native[144][160], viewport[150][200];
++	struct pgb_silver_jp adapter;
++	unsigned int terrain_rows, blank_rows;
++	int history_only;
++	unsigned int restored_facings;
++};
++static uint8_t rom_read(struct gb_s *gb, uint_fast32_t a)
++{
++	struct silver_test *p = gb->direct.priv;
++	assert(a < 1048576);
++	if(p->adapter.supported)
++	{
++		uint8_t value = pgb_silver_jp_rom_read(&p->adapter, gb, a);
++		if(gb->cpu_reg.pc.reg == 0x18d1 && a >= 0x4275 && a < 0x4274 + 37 * 6 &&
++			(a - 0x4275) % 6 == 0 && value != p->rom[a]) p->restored_facings++;
++		return value;
++	}
++	return p->rom[a];
++}
++static uint8_t ram_read(struct gb_s *gb, uint_fast32_t a)
++{
++	struct silver_test *p = gb->direct.priv;
++	assert(a < sizeof(p->ram));
++	return p->ram[a];
++}
++static void ram_write(struct gb_s *gb, uint_fast32_t a, uint8_t v)
++{
++	struct silver_test *p = gb->direct.priv;
++	assert(a < sizeof(p->ram));
++	p->ram[a] = v;
++}
++static void fail(struct gb_s *gb, enum gb_error_e e, uint16_t a)
++{
++	(void)gb;
++	fprintf(stderr, "Emulation error %d at %04x\n", e, a);
++	abort();
++}
++static void native_line(struct gb_s *gb, const uint8_t *pixels, uint_fast8_t y)
++{
++	struct silver_test *p = gb->direct.priv;
++	memcpy(p->native[y], pixels, 160);
++	if(p->history_only && (y == 0 || !p->adapter.frame_ready))
++		pgb_silver_begin_frame(&p->adapter, gb);
++}
++static void terrain(struct gb_s *gb, uint8_t *row, uint16_t width, int32_t x, int32_t y)
++{
++	struct silver_test *p = gb->direct.priv;
++	uint8_t margins[200];
++	assert(width <= sizeof(margins));
++	memset(margins, 0xa5, sizeof(margins));
++	int margin_valid = pgb_silver_jp_margins(&p->adapter, gb, margins, width, x, y);
++	if(pgb_silver_jp_background(&p->adapter, gb, row, width, x, y))
++	{
++		assert(margin_valid);
++		for(unsigned int i = 0; i < width; i++)
++			if(y < 0 || y >= 144 || x + (int)i < 0 || x + (int)i >= 160)
++				assert(margins[i] == row[i]);
++			else assert(margins[i] == 0xa5);
++		p->terrain_rows++;
++	}
++	else
++	{
++		p->blank_rows++;
++		memset(row, 0, width);
++	}
++}
++static void viewport_line(struct gb_s *gb, const uint8_t *pixels, uint16_t y)
++{
++	struct silver_test *p = gb->direct.priv;
++	assert(y < 150);
++	memcpy(p->viewport[y], pixels, 200);
++	if(y >= 3 && y < 147)
++		assert(memcmp(pixels + 20, p->native[y - 3], 160) == 0);
++}
++static void screenshot(const struct silver_test *p, const char *dir, const char *name)
++{
++	char path[1024];
++	FILE *f;
++	if(dir == NULL) return;
++	assert(snprintf(path, sizeof(path), "%s/%s.ppm", dir, name) < (int)sizeof(path));
++	f = fopen(path, "wb");
++	assert(f);
++	fprintf(f, "P6\n200 150\n255\n");
++	for(int y = 0; y < 150; y++)
++		for(int x = 0; x < 200; x++)
++		{
++			uint8_t rgb[3];
++			rgb[0] = rgb[1] = rgb[2] = (p->viewport[y][x] & 3) * 85;
++			assert(fwrite(rgb, 1, 3, f) == 3);
++		}
++	fclose(f);
++}
++
++#include "silver_sprite_tests.h"
++#include "silver_frame_tests.h"
++#include "silver_npc_lifecycle_tests.h"
++#include "silver_npc_policy_tests.h"
++#include "silver_npc_wrap_tests.h"
++#include "silver_connection_tests.h"
++#include "silver_npc_motion_tests.h"
++#include "silver_border_tests.h"
++#include "silver_neighbor_tests.h"
++#include "silver_feature_tests.h"
++
++int main(int argc, char **argv)
++{
++	static struct silver_test a, b;
++	static struct gb_s ga, gb;
++	static int16_t predicted[1300 * 16];
++	uint8_t rom[1048576], row[200];
++	unsigned int revealed = 0, differing = 0, map_frames = 0, moving_frames = 0;
++	unsigned int sprite_margin_pixels = 0, coherent_frames = 0;
++	int map_id = -1, first_x = -1, min_x = 999, max_x = -1;
++	FILE *f;
++	assert(argc == 3 || argc == 4);
++	int scene_check = argc == 4 && strcmp(argv[3], "--scene-check") == 0;
++	const char *screenshot_dir = argc == 4 && !scene_check ? argv[3] : NULL;
++	f = fopen(argv[1], "rb"); assert(f);
++	assert(fread(rom, 1, sizeof(rom), f) == sizeof(rom)); fclose(f);
++	f = fopen(argv[2], "rb"); assert(f);
++	assert(fread(a.ram, 1, sizeof(a.ram), f) == sizeof(a.ram)); fclose(f);
++	memcpy(b.ram, a.ram, sizeof(a.ram)); a.rom = b.rom = rom;
++	assert(pgb_silver_jp_init(&b.adapter, rom, sizeof(rom)));
++	silver_sprite_tests(&b.adapter, rom);
++	silver_npc_policy_tests(&b.adapter);
++	assert(!pgb_silver_jp_init(&a.adapter, rom, sizeof(rom) - 1));
++	rom[0] ^= 1;
++	assert(!pgb_silver_jp_init(&a.adapter, rom, sizeof(rom)));
++	rom[0] ^= 1;
++	assert(pgb_silver_jp_init(&a.adapter, rom, sizeof(rom)));
++	a.history_only = 1;
++	pgb_silver_jp_viewport(&a.adapter, 200, 150);
++	pgb_silver_jp_viewport(&b.adapter, 200, 150);
++	assert(gb_init(&ga, rom_read, ram_read, ram_write, fail, &a) == GB_INIT_NO_ERROR);
++	assert(gb_init(&gb, rom_read, ram_read, ram_write, fail, &b) == GB_INIT_NO_ERROR);
++	gb_init_lcd(&ga, native_line); gb_init_lcd(&gb, native_line);
++	assert(gb_set_lcd_viewport(&gb, 200, 150, row, viewport_line) == 0);
++	gb_set_lcd_background(&gb, terrain);
++	for(int frame = 0; frame < 8000; frame++)
++	{
++		struct gb_s normalized;
++		struct pgb_silver_map m;
++		uint8_t keys = 0xff;
++		if(frame >= 120 && frame < 460 && frame % 60 < 4)
++			keys &= ~(frame < 180 ? JOYPAD_START : JOYPAD_A);
++		if(frame >= 500 && frame < 620) keys &= ~JOYPAD_LEFT;
++		if(frame >= 650 && frame < 770) keys &= ~JOYPAD_RIGHT;
++		if(frame >= 800 && frame < 900) keys &= ~JOYPAD_UP;
++		if(frame >= 930 && frame < 1030) keys &= ~JOYPAD_DOWN;
++		if(frame >= 1060 && frame < 1064) keys &= ~JOYPAD_START;
++		if(frame >= 1120 && frame < 1124) keys &= ~JOYPAD_B;
++		if(frame >= 1200 && frame < 1650) keys &= ~JOYPAD_LEFT;
++		if(frame >= 1800)
++		{
++			int direction = (frame / 120) % 4;
++			keys = 0xff & ~(direction == 0 ? JOYPAD_LEFT : direction == 1 ?
++				JOYPAD_UP : direction == 2 ? JOYPAD_RIGHT : JOYPAD_DOWN);
++		}
++		unsigned int terrain_before = b.terrain_rows, blank_before = b.blank_rows;
++		ga.direct.joypad = gb.direct.joypad = keys;
++		gb_run_frame(&ga); gb_run_frame(&gb);
++		unsigned int rendered = b.terrain_rows - terrain_before;
++		unsigned int blanked = b.blank_rows - blank_before;
++		/* A one-line blank amidst otherwise valid terrain is a visible white
++		 * flash. Scene validity must be uniform across each presented frame. */
++		assert(rendered == 0 || blanked == 0);
++		if(rendered + blanked) coherent_frames++;
++		/* Both instances use the SAME NPC policy; presentation must be read-only. */
++		normalized = gb;
++		normalized.display = ga.display;
++		normalized.direct.priv = ga.direct.priv;
++		assert(memcmp(&ga, &normalized, sizeof(ga)) == 0);
++		assert(memcmp(a.ram, b.ram, sizeof(a.ram)) == 0);
++		assert(memcmp(a.native, b.native, sizeof(a.native)) == 0);
++		if(frame == 560) screenshot(&b, screenshot_dir, "silver-200x150-left");
++		if(frame == 720) screenshot(&b, screenshot_dir, "silver-200x150-right");
++		if(frame == 1100)
++		{
++			screenshot(&b, screenshot_dir, "silver-200x150-menu");
++			for(int y = 0; y < 150; y++)
++				for(int x = 0; x < 200; x++)
++					if(x < 20 || x >= 180 || y < 3 || y >= 147)
++						assert(b.viewport[y][x] == 0);
++		}
++		if(!pgb_silver_map_state(&b.adapter, &gb, &m)) continue;
++		if(!pgb_silver_jp_background(&b.adapter, &gb, row, 200, -20, 0)) continue;
++		/* Independent oracle: reconstruct all native pixels too, then compare
++		 * with the actual hardware renderer (not only our composited copy). */
++		for(int sy = 0; sy < 144; sy++)
++		{
++			uint8_t reconstructed[160];
++			assert(pgb_silver_jp_background(&b.adapter, &gb, reconstructed, 160, 0, sy));
++			assert(memcmp(reconstructed, b.native[sy], 160) == 0);
++		}
++		if(frame == 630)
++		{
++			silver_frame_tests(&b.adapter, &gb);
++			if(gb.wram[0x19c6] == 24 && gb.wram[0x19c7] == 4)
++				silver_npc_lifecycle_tests(&gb, &b);
++			if(gb.wram[0x19c6] == 26 && gb.wram[0x19c7] == 3)
++				silver_connection_walk_tests(&gb, &b);
++			silver_npc_wrap_tests(&gb, &b);
++			silver_npc_motion_tests(&gb, &b);
++			silver_connection_tests(&gb, &b);
++			silver_border_tests(&gb, &b);
++			silver_neighbor_tests(&gb, &b);
++			silver_feature_tests(&gb, &b);
++			if(scene_check) { puts("PASS: focused live-scene checks; input ROM/save remain read-only."); return 0; }
++			static struct silver_test without_sprites;
++			screenshot(&b, screenshot_dir, "silver-200x150-npc-on");
++			b.adapter.sprites_enabled = 0;
++			for(int y = 0; y < 150; y++)
++			{
++				uint8_t *dst = without_sprites.viewport[y];
++				if(!pgb_silver_jp_background(&b.adapter, &gb, dst, 200, -20, y - 3))
++					memset(dst, 0, 200);
++				if(y >= 3 && y < 147) memcpy(dst + 20, b.native[y - 3], 160);
++				for(int x = 0; x < 200; x++)
++					if(x < 20 || x >= 180 || y < 3 || y >= 147)
++						sprite_margin_pixels += dst[x] != b.viewport[y][x];
++			}
++			b.adapter.sprites_enabled = 1;
++			screenshot(&without_sprites, screenshot_dir, "silver-200x150-npc-off");
++		}
++		map_frames++;
++		if(gb.hram_io[0x43] & 7) moving_frames++;
++		if(frame >= 480 && frame < 800)
++		{
++			int x = gb.wram[0x19c9];
++			if(first_x < 0) first_x = x;
++			if(x < min_x) min_x = x;
++			if(x > max_x) max_x = x;
++		}
++		int id = gb.wram[0x19c6] * 256 + gb.wram[0x19c7];
++		if(id != map_id)
++		{
++			for(unsigned int j = 0; j < sizeof(predicted) / sizeof(*predicted); j++) predicted[j] = -1;
++			map_id = id;
++		}
++		/* Independent temporal oracle: compare previously offscreen terrain
++		 * predictions to the actual native VRAM tiles AFTER walking there. */
++		for(int sy = 8; sy < 136; sy += 8)
++			for(int sx = -20; sx < 180; sx += 8)
++			{
++				int wx = m.origin_x + sx, wy = m.origin_y + sy;
++				if(wx < 0 || wy < 0 || wx >= m.width * 32 || wy >= m.height * 32) continue;
++				int index = (wy / 8) * m.width * 4 + wx / 8;
++				assert(index >= 0 && index < 1300 * 16);
++				if(sx < 0 || sx >= 160)
++				{
++					uint8_t tile = pgb_silver_tile(&b.adapter, &gb, &m, wx, wy);
++					uint8_t vx = (uint8_t)(sx + gb.hram_io[0x43]);
++					uint8_t vy = (uint8_t)(sy + gb.hram_io[0x42]);
++					predicted[index] = tile;
++					differing += tile != gb.vram[0x1800 + (vy >> 3) * 32 + (vx >> 3)];
++				}
++				else if(predicted[index] >= 0)
++				{
++					uint8_t vx = (uint8_t)(sx + gb.hram_io[0x43]);
++					uint8_t vy = (uint8_t)(sy + gb.hram_io[0x42]);
++					assert(predicted[index] == gb.vram[0x1800 + (vy >> 3) * 32 + (vx >> 3)]);
++					predicted[index] = -1;
++					revealed++;
++				}
++			}
++	}
++	printf("map_frames=%u sub_tile_scroll_frames=%u terrain_rows=%u blank_rows=%u\n",
++		map_frames, moving_frames, b.terrain_rows, b.blank_rows);
++	printf("revealed_predictions=%u corrected_stale_tiles=%u walked_x=%d..%d (start %d)\n",
++		revealed, differing, min_x, max_x, first_x);
++	assert(map_frames > 500 && moving_frames > 100 && revealed > 100 && differing > 100);
++	assert(min_x < first_x && max_x >= first_x);
++	printf("sprite_margin_pixels=%u; %u reconstructed native frames match pixel-for-pixel\n", sprite_margin_pixels, map_frames);
++	assert(sprite_margin_pixels > 0);
++	printf("PASS: %u coherent rendered frames; presentation preserves configured CPU/PPU/save state for 8000 frames.\n", coherent_frames);
++	return 0;
++}
+diff --git a/test/viewport_tests.h b/test/viewport_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/viewport_tests.h
+@@ -0,0 +1,118 @@
++void __gb_draw_line(struct gb_s *gb);
++
++/* Included by test.c so both header-only and separate compilation exercise API. */
++struct viewport_test_priv
++{
++	uint8_t native[144][160];
++	uint8_t extended[181][257];
++	uint16_t width, height;
++	unsigned int lines;
++};
++
++static void viewport_native(struct gb_s *gb, const uint8_t *pixels,
++		uint_fast8_t line)
++{
++	struct viewport_test_priv *p = gb->direct.priv;
++	memcpy(p->native[line], pixels, 160);
++}
++
++static void viewport_output(struct gb_s *gb, const uint8_t *pixels, uint16_t line)
++{
++	struct viewport_test_priv *p = gb->direct.priv;
++	assert(line < p->height);
++	memcpy(p->extended[line], pixels, p->width);
++	p->lines++;
++	if(line >= (p->height - 144) / 2 && line < (p->height - 144) / 2 + 144)
++		lok(memcmp(p->native[line - (p->height - 144) / 2],
++			pixels + (p->width - 160) / 2, 160) == 0);
++}
++
++static void test_viewport(void)
++{
++	struct gb_s a = {0}, b = {0}, normalized;
++	struct viewport_test_priv p = {0}, q = {0};
++	uint8_t row[259];
++	unsigned int sizes[][2] = {{160,144}, {160,160}, {177,163}, {257,181}};
++	unsigned int i, x, y, mode;
++	lok(gb_init(&a, gb_rom_read_acid, gb_cart_ram_read,
++		gb_cart_ram_write, gb_error, &p) == GB_INIT_NO_ERROR);
++	lok(gb_init(&b, gb_rom_read_acid, gb_cart_ram_read,
++		gb_cart_ram_write, gb_error, &q) == GB_INIT_NO_ERROR);
++	gb_init_lcd(&a, viewport_native);
++	gb_init_lcd(&b, viewport_native);
++	/* Native image, CPU/PPU state and every cycle counter must remain identical. */
++	for(i = 0; i < 100; i++)
++	{
++		q.width = sizes[i % 4][0];
++		q.height = sizes[i % 4][1];
++		memset(row, 0xa5, sizeof(row));
++		lok(gb_set_lcd_viewport(&b, q.width, q.height, row + 1,
++			viewport_output) == 0);
++		gb_run_frame(&a);
++		gb_run_frame(&b);
++		lok(memcmp(p.native, q.native, sizeof(p.native)) == 0);
++		normalized = b;
++		normalized.display = a.display;
++		normalized.direct.priv = a.direct.priv;
++		lok(memcmp(&a, &normalized, sizeof(a)) == 0);
++		lok(row[0] == 0xa5 && row[q.width + 1] == 0xa5);
++
++	}
++	lok(fnv1a_hash(p.native, sizeof(p.native)) == DMG_ACID2_HASH);
++	/* Synthetic map: verify wrap, signed/unsigned tile addressing, map select,
++	 * odd margins and widths larger than 256 with an independent pixel oracle. */
++	q.width = 257;
++	q.height = 181;
++	gb_set_lcd_viewport(&b, q.width, q.height, row + 1, viewport_output);
++	for(mode = 0; mode < 4; mode++)
++	{
++		uint16_t map = mode & 1 ? VRAM_BMAP_2 : VRAM_BMAP_1;
++		uint16_t tile = mode & 2 ? VRAM_TILES_1 + 255 * 16 :
++			VRAM_TILES_2 + 127 * 16;
++		b.hram_io[0x40] = LCDC_BG_ENABLE | (mode & 1 ? LCDC_BG_MAP : 0) |
++			(mode & 2 ? LCDC_TILE_SELECT : 0);
++		b.hram_io[0x43] = 253;
++		b.hram_io[0x42] = 3;
++		memset(b.vram, 0, sizeof(b.vram));
++		memset(b.vram + map, 255, 1024);
++		for(y = 0; y < 8; y++)
++		{
++			b.vram[tile + y * 2] = (uint8_t)(0x81 >> (y & 3));
++			b.vram[tile + y * 2 + 1] = (uint8_t)(0x55 << (y & 1));
++		}
++		for(i = 0; i < 4; i++) b.display.bg_palette[i] = 3 - i;
++		q.lines = 0;
++		for(y = 0; y < 144; y++)
++		{
++			b.hram_io[0x44] = y;
++			__gb_draw_line(&b);
++		}
++		lok(q.lines == q.height);
++		for(y = 0; y < q.height; y++)
++			for(x = 0; x < q.width; x++)
++			{
++				uint8_t bx = (uint8_t)((int)x - (q.width - 160) / 2 + 253);
++				uint8_t by = (uint8_t)((int)y - (q.height - 144) / 2 + 3);
++				unsigned int bit = 7 - (bx & 7);
++				uint8_t expected = 3 - (((b.vram[tile + (by & 7)*2] >> bit) & 1) |
++					(((b.vram[tile + (by & 7)*2 + 1] >> bit) & 1) << 1));
++#if PEANUT_GB_12_COLOUR
++				expected |= LCD_PALETTE_BG;
++#endif
++				lok(q.extended[y][x] == expected);
++			}
++	}
++	lok(gb_set_lcd_viewport(&b, 159, 160, row, viewport_output) == -1);
++	lok(gb_set_lcd_viewport(&b, 160, 143, row, viewport_output) == -1);
++	lok(gb_set_lcd_viewport(&b, 160, 160, NULL, viewport_output) == -1);
++	q.lines = 0;
++	lok(gb_set_lcd_viewport(&b, 0, 0, NULL, NULL) == 0);
++	b.hram_io[0x44] = 0;
++	__gb_draw_line(&b);
++	lok(q.lines == 0);
++	/* Viewport-only callback works with the native callback disabled. */
++	gb_init_lcd(&b, NULL);
++	gb_set_lcd_viewport(&b, q.width, q.height, row + 1, viewport_output);
++	__gb_draw_line(&b);
++	lok(q.lines == (unsigned int)(q.height - 144) / 2 + 1);
++}
+diff --git a/test/silver_border_tests.h b/test/silver_border_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_border_tests.h
+@@ -0,0 +1,114 @@
++/* Border ownership must be spatial, not depend on the active map. Probe
++ * void positions and rebase through EVERY map in the same ROM component. */
++static void silver_border_tests(const struct gb_s *source, const struct silver_test *data)
++{
++	static struct gb_s gb;
++	static struct pgb_silver_jp copy;
++	static struct { int x,y; uint8_t tile; } points[16384];
++	const struct pgb_silver_jp *s = &data->adapter;
++	unsigned int count = 0, compared = 0;
++	int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
++	assert(s->atlas_count > 1 && s->atlas_count < 64);
++	for(unsigned int i = 0; i < s->atlas_count; i++)
++	{
++		const struct pgb_silver_connection *c = &s->atlas[i];
++		if(c->x < min_x) min_x = c->x;
++		if(c->y < min_y) min_y = c->y;
++		if(c->x + c->width > max_x) max_x = c->x + c->width;
++		if(c->y + c->height > max_y) max_y = c->y + c->height;
++	}
++	for(int by = min_y - 16; by <= max_y + 16; by += 3)
++		for(int bx = min_x - 16; bx <= max_x + 16; bx += 3)
++		{
++			unsigned int i;
++			for(i = 0; i < s->atlas_count; i++)
++			{
++				const struct pgb_silver_connection *c = &s->atlas[i];
++				if(bx >= c->x && by >= c->y && bx < c->x + c->width && by < c->y + c->height) break;
++			}
++			if(i < s->atlas_count) continue; /* deliberately sample only auto-fill */
++			assert(count < sizeof(points) / sizeof(*points));
++			points[count].x = bx * 32 + 8; points[count].y = by * 32 + 24;
++			points[count].tile = pgb_silver_world_tile(s, source, &s->frame_map, points[count].x, points[count].y);
++			count++;
++		}
++	for(unsigned int map = 0; map < s->atlas_count; map++)
++	{
++		copy = *s; gb = *source;
++		const struct pgb_silver_connection *target = &s->atlas[map];
++		int dx = (target->x - 3) * 32, dy = (target->y - 3) * 32;
++		gb.wram[0x19c6] = target->group; gb.wram[0x19c7] = target->number;
++		copy.frame_map.width = target->width + 6; copy.frame_map.height = target->height + 6;
++		copy.frame_map.border = target->border;
++		pgb_silver_atlas(&copy, &gb, &copy.frame_map);
++		assert(copy.atlas_count == s->atlas_count);
++		for(unsigned int point = 0; point < count; point++)
++		{
++			uint8_t tile = pgb_silver_world_tile(&copy, &gb, &copy.frame_map,
++				points[point].x - dx, points[point].y - dy);
++			assert(tile == points[point].tile); compared++;
++		}
++	}
++	/* Distinct borders must remain distinct, rather than fixing the pop by
++	 * painting the whole void with a single permanent water/tree texture. */
++	copy = *s; copy.atlas_count = 2;
++	unsigned int other;
++	for(other = 1; other < s->atlas_count; other++)
++		if(s->atlas[other].border != s->atlas[0].border) break;
++	assert(other < s->atlas_count);
++	copy.atlas[0] = s->atlas[0]; copy.atlas[1] = s->atlas[other];
++	for(unsigned int i = 0; i < 2; i++)
++	{
++		copy.atlas[i].x = 3 + i; copy.atlas[i].y = 3;
++		copy.atlas[i].width = copy.atlas[i].height = 1;
++	}
++	unsigned int different = 0;
++	for(int ty = 0; ty < 4; ty++)
++		for(int tx = 0; tx < 4; tx++)
++		{
++			uint8_t tiles[2];
++			for(unsigned int i = 0; i < 2; i++)
++			{
++				tiles[i] = pgb_silver_world_tile(&copy, source, &copy.frame_map,
++					(3 + i) * 32 + tx * 8, 2 * 32 + ty * 8);
++				assert(tiles[i] == s->rom[s->frame_map.definitions +
++					(copy.atlas[i].border & 127) * 16 + ty * 4 + tx]);
++			}
++			different += tiles[0] != tiles[1];
++		}
++	assert(different > 0);
++	/* An equal-distance gap must not depend on descriptor traversal order. */
++	copy.atlas[1].x = 5;
++	uint8_t tie = pgb_silver_world_tile(&copy, source, &copy.frame_map, 4 * 32 + 8, 3 * 32);
++	struct pgb_silver_connection swap = copy.atlas[0];
++	copy.atlas[0] = copy.atlas[1]; copy.atlas[1] = swap;
++	assert(pgb_silver_world_tile(&copy, source, &copy.frame_map, 4 * 32 + 8, 3 * 32) == tie);
++	/* Check the actual row renderer, including cache boundaries at x=0/160
++	 * and non-tile-aligned scroll, against a per-pixel independent lookup. */
++	static const int widths[] = {317,641,1281}, ys[] = {-129,35,190};
++	uint8_t row[1281];
++	copy = *s; gb = *source; copy.sprites_enabled = 0;
++	copy.frame_ready = copy.frame_valid = 1; copy.last_native_line = gb.hram_io[0x44];
++	for(unsigned int size = 0; size < 3; size++)
++	{
++		int x = -widths[size] / 2 + 17, y = ys[size];
++		assert(pgb_silver_jp_background(&copy, &gb, row, widths[size], x, y));
++		for(int i = 0; i < widths[size]; i++)
++		{
++			int sx = x + i, wx = copy.frame_map.origin_x + sx, wy = copy.frame_map.origin_y + y;
++			uint8_t tile = sx >= 0 && sx < 160 && y >= 0 && y < 144 ?
++				pgb_silver_tile(&copy, &gb, &copy.frame_map, wx, wy) :
++				pgb_silver_world_tile(&copy, &gb, &copy.frame_map, wx, wy);
++			unsigned int at = 0x800 + ((tile + 128) & 255) * 16 + ((uint32_t)wy & 7) * 2;
++			unsigned int bit = 7 - ((uint32_t)wx & 7);
++			uint8_t colour = gb.display.bg_palette[((gb.vram[at] >> bit) & 1) | (((gb.vram[at + 1] >> bit) & 1) << 1)];
++#if PEANUT_GB_12_COLOUR
++			colour |= LCD_PALETTE_BG;
++#endif
++			assert(row[i] == colour);
++		}
++	}
++	assert(count > 100 && compared > 1000);
++	printf("PASS: stable ocean/forest fill across %u connected maps: %u world positions, %u rebased comparisons; odd-width row pixels match.\n",
++		s->atlas_count, count, compared);
++}
+diff --git a/test/silver_connection_tests.h b/test/silver_connection_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_connection_tests.h
+@@ -0,0 +1,187 @@
++/* Verify ROM-connected terrain past the engine's 96-pixel RAM padding.
++ * Compare each expanded block against its full source array, and independently
++ * reconcile the source array with the game's loaded connection strip. */
++static void silver_connection_tests(const struct gb_s *gb, const struct silver_test *p)
++{
++	const struct pgb_silver_jp *s = &p->adapter;
++	const struct pgb_silver_map *m = &s->frame_map;
++	unsigned int expanded = 0, reconciled = 0, differing = 0;
++	for(unsigned int side = 0; side < 4; side++)
++	{
++		const struct pgb_silver_connection *c = &s->connections[side];
++		if(!c->blocks) continue;
++		for(int cy = 0; cy < c->height; cy++)
++			for(int cx = 0; cx < c->width; cx++)
++			{
++				int bx = c->x + cx, by = c->y + cy;
++				uint8_t block = s->rom[c->blocks + cy * c->width + cx];
++				if(bx >= 0 && by >= 0 && bx < m->width && by < m->height)
++				{
++					/* Connection-strip corner clipping needn't fill every cell. */
++					if(gb->wram[0x700 + by * m->width + bx] == block) reconciled++;
++					continue;
++				}
++				if(!block) block = m->border;
++				for(int ty = 0; ty < 4; ty++)
++					for(int tx = 0; tx < 4; tx++)
++					{
++						uint8_t tile = pgb_silver_tile(s, gb, m, bx * 32 + tx * 8, by * 32 + ty * 8);
++						uint8_t expected = s->rom[m->definitions + (block & 127) * 16 + ty * 4 + tx];
++						assert(tile == expected);
++						differing += tile != s->rom[m->definitions + (m->border & 127) * 16 + ty * 4 + tx];
++						expanded++;
++					}
++			}
++	}
++	/* Absent connection slots can contain stale data from the previous map. */
++	static struct gb_s changed;
++	struct pgb_silver_jp copy = *s;
++	changed = *gb; changed.wram[0x1083] = 0;
++	pgb_silver_connections(&copy, &changed, m);
++	for(unsigned int side = 0; side < 4; side++) assert(copy.connections[side].blocks == 0);
++	changed = *gb; changed.wram[0x1074] ^= 0xff;
++	pgb_silver_connections(&copy, &changed, m);
++	for(unsigned int side = 0; side < 4; side++) assert(copy.connections[side].blocks == 0);
++	assert(expanded > 100 && reconciled > 10 && differing > 100);
++	printf("PASS: connected-map terrain beyond RAM padding; %u tiles, %u strip blocks, %u non-border tiles.\n", expanded, reconciled, differing);
++}
++
++/* Current user's Cherrygrove save: follow a floor-only path to Route 29,
++ * exercising the real MAPSTATUS_ENTER interval without any RAM writes. */
++static void silver_connection_walk_tests(const struct gb_s *source, const struct silver_test *data)
++{
++	static struct gb_s gb;
++	static struct silver_test p;
++	unsigned int entered = 0, blank = 0, flat = 0, settled = 0;
++	unsigned int anticipated = 0, taken_over = 0, gaps = 0;
++	int previous_x = 0, previous_y = 0;
++	gb = *source; p = *data; gb.direct.priv = &p; p.history_only = 1;
++	gb_init_lcd(&gb, native_line);
++	assert(gb_set_lcd_viewport(&gb, 160, 144, NULL, NULL) == 0);
++	pgb_silver_jp_viewport(&p.adapter, 641, 481);
++	static struct { int x,y; uint8_t tile; } fill[1024];
++	unsigned int fill_count = 0, fill_compared = 0;
++	for(int by = -24; by <= 64; by += 4)
++		for(int bx = -24; bx <= 64; bx += 4)
++		{
++			unsigned int i;
++			for(i = 0; i < p.adapter.atlas_count; i++)
++			{
++				const struct pgb_silver_connection *c = &p.adapter.atlas[i];
++				if(bx >= c->x && by >= c->y && bx < c->x + c->width && by < c->y + c->height) break;
++			}
++			if(i < p.adapter.atlas_count) continue;
++			assert(fill_count < sizeof(fill) / sizeof(*fill));
++			fill[fill_count].x = bx * 32 + 8; fill[fill_count].y = by * 32;
++			fill[fill_count].tile = pgb_silver_world_tile(&p.adapter, &gb, &p.adapter.frame_map,
++				fill[fill_count].x, fill[fill_count].y);
++			fill_count++;
++		}
++
++	for(unsigned int frame = 0; frame < 1600 && settled < 30; frame++)
++	{
++		uint8_t keys = 0xff;
++		if(gb.wram[0x19c6] == 26 && gb.wram[0x19c7] == 3)
++		{
++			int width = gb.wram[0x107a] * 2, height = gb.wram[0x1079] * 2;
++			int queue[1300 * 4], parent[1300 * 4], head = 0, tail = 0, end = -1;
++			int start = gb.wram[0x19c8] * width + gb.wram[0x19c9];
++			uint32_t base = gb.wram[0x10ba] * 0x4000u + pgb_silver_word(&gb, 0xd0bb) - 0x4000;
++			assert(width * height <= 1300 * 4 && start < width * height);
++			for(int i = 0; i < width * height; i++) parent[i] = -1;
++			queue[tail++] = start; parent[start] = start;
++			while(head < tail)
++			{
++				int node = queue[head++], x = node % width, y = node / width;
++				if(x == width - 1) { end = node; break; }
++				for(int direction = 0; direction < 4; direction++)
++				{
++					int nx = x + (direction == 0) - (direction == 1);
++					int ny = y + (direction == 2) - (direction == 3), next = ny * width + nx;
++					if(nx < 0 || ny < 0 || nx >= width || ny >= height || parent[next] >= 0) continue;
++					unsigned int block = gb.wram[0x700 + (ny / 2 + 3) * (width / 2 + 6) + nx / 2 + 3];
++					if(p.rom[base + block * 4 + (ny & 1) * 2 + (nx & 1)] != 0) continue;
++					int occupied = 0;
++					for(unsigned int slot = 1; slot < 13; slot++)
++					{
++						const uint8_t *actor = gb.wram + 0x11f0 + slot * 40;
++						if(!actor[0] || (actor[4] & 1)) continue;
++						if((nx == (int)actor[16] - 4 && ny == (int)actor[17] - 4) ||
++							(nx == (int)actor[18] - 4 && ny == (int)actor[19] - 4)) occupied = 1;
++					}
++					if(occupied) continue;
++					parent[next] = node; queue[tail++] = next;
++				}
++			}
++			/* During transfer coordinates can change before map ID/metadata. */
++			if(end >= 0 && end != start)
++			{
++				while(parent[end] != start) end = parent[end];
++				int dx = end % width - start % width, dy = end / width - start / width;
++				keys &= ~(dx > 0 ? JOYPAD_RIGHT : dx < 0 ? JOYPAD_LEFT : dy > 0 ? JOYPAD_DOWN : JOYPAD_UP);
++			}
++			else keys &= ~JOYPAD_RIGHT;
++		}
++		else
++		{
++			assert(gb.wram[0x19c6] == 24 && gb.wram[0x19c7] == 3);
++			entered++;
++			if(gb.wram[0x114b] == 2) settled++;
++		}
++		gb.direct.joypad = keys; gb_run_frame(&gb);
++		blank += !p.adapter.frame_valid;
++		if(p.adapter.frame_valid)
++			for(unsigned int i = 0; i < p.adapter.atlas_count; i++)
++			{
++				const struct pgb_silver_connection *city = &p.adapter.atlas[i];
++				if(city->group != 26 || city->number != 3) continue;
++				for(unsigned int point = 0; point < fill_count; point++)
++				{
++					uint8_t tile = pgb_silver_world_tile(&p.adapter, &gb, &p.adapter.frame_map,
++						fill[point].x + (city->x - 3) * 32, fill[point].y + (city->y - 3) * 32);
++					assert(tile == fill[point].tile); fill_compared++;
++				}
++				break;
++			}
++
++		/* Route 29 Teacher (event 4): visible ahead of entering her map,
++		 * then exactly one real current-map object takes over that identity. */
++		if(p.adapter.frame_valid)
++		{
++			unsigned int found = 0;
++			for(unsigned int i = 0; i < p.adapter.object_count; i++)
++			{
++				const struct pgb_silver_object *o = &p.adapter.objects[i];
++				if(o->map_group != 24 || o->map_number != 3 || o->map_index != 4) continue;
++				found++;
++				const struct pgb_silver_connection *city = NULL;
++				for(unsigned int j = 0; j < p.adapter.atlas_count; j++)
++					if(p.adapter.atlas[j].group == 26 && p.adapter.atlas[j].number == 3) city = &p.adapter.atlas[j];
++				assert(city);
++				int world_x = o->x + p.adapter.frame_map.origin_x - (city->x - 3) * 32;
++				int world_y = o->y + p.adapter.frame_map.origin_y - (city->y - 3) * 32;
++				if(o->preview)
++				{
++					assert(!o->live);
++					if(o->x + 16 > -240 && o->x < 401 && o->y + 16 > -168 && o->y < 313) anticipated++;
++					previous_x = world_x; previous_y = world_y;
++				}
++				else if(anticipated)
++				{
++					if(!taken_over)
++						assert(abs(world_x - previous_x) <= 4 && abs(world_y - previous_y) <= 4);
++					taken_over++;
++				}
++			}
++			assert(found <= 1);
++			if(anticipated) gaps += !found;
++		}
++		int uniform = 1;
++		for(unsigned int i = 1; i < sizeof(p.native); i++)
++			if(((const uint8_t *)p.native)[i] != p.native[0][0]) { uniform = 0; break; }
++		flat += uniform;
++	}
++	assert(entered > 0 && settled == 30 && blank == 0 && flat == 0 && fill_compared > 10000);
++	assert(anticipated > 5 && taken_over > 5 && gaps == 0);
++	printf("PASS: Cherrygrove -> Route 29: %u settling frames, %u stable fill samples, preview/real Teacher %u/%u frames, no gaps or duplicate handoffs.\n", entered, fill_compared, anticipated, taken_over);
++}
+diff --git a/test/silver_feature_tests.h b/test/silver_feature_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_feature_tests.h
+@@ -0,0 +1,22 @@
++/* Exercise real-scene feature independence and bounded preview saturation. */
++static void silver_feature_tests(const struct gb_s *gb, const struct silver_test *data)
++{
++ static struct pgb_silver_jp s;
++ uint8_t row[200],before[200];
++ s=data->adapter;pgb_silver_jp_viewport(&s,200,150);
++ assert(pgb_silver_jp_configure(&s,0,28));
++ for(unsigned int a=0;a<1048576;a++)assert(pgb_silver_jp_rom_read(&s,gb,a)==s.rom[a]);
++ memset(row,0xa5,sizeof(row));memcpy(before,row,sizeof(row));
++ assert(!pgb_silver_jp_background(&s,gb,row,200,-20,0));assert(!memcmp(row,before,sizeof(row)));
++ assert(pgb_silver_jp_configure(&s,PGB_SILVER_TERRAIN,28));
++ assert(pgb_silver_begin_frame(&s,gb));assert(!s.object_count&&!s.atlas_count);
++ assert(pgb_silver_jp_background(&s,gb,row,200,-20,0));
++ assert(pgb_silver_jp_configure(&s,PGB_SILVER_ALL & ~PGB_SILVER_NEIGHBOR_NPCS,28));
++ assert(pgb_silver_begin_frame(&s,gb));for(unsigned int i=0;i<s.object_count;i++)assert(!s.objects[i].preview);
++ assert(pgb_silver_jp_configure(&s,PGB_SILVER_ALL,28));pgb_silver_jp_viewport(&s,1921,1081);
++ assert(pgb_silver_begin_frame(&s,gb));s.object_count=28;s.objects_dropped=0;
++ pgb_silver_preview_sprites(&s,gb,&s.frame_map);assert(s.object_count==28&&s.objects_dropped>0);
++ assert(pgb_silver_jp_configure(&s,PGB_SILVER_ALL,28));
++ assert(!s.frame_ready&&!s.frame_valid&&!s.atlas_count);
++ puts("PASS independent features: all-off ROM identity, terrain-only, neighbour toggle, bounded preview overflow and reconfiguration invalidation.");
++}
+diff --git a/test/silver_frame_tests.h b/test/silver_frame_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_frame_tests.h
+@@ -0,0 +1,97 @@
++/* Regression for mid-frame anchor writes / per-scanline validity flicker. */
++static void silver_frame_tests(const struct pgb_silver_jp *source, const struct gb_s *game)
++{
++	static struct gb_s gb;
++	struct pgb_silver_jp adapter = *source;
++	uint8_t expected[200], actual[200];
++	gb = *game;
++	adapter.frame_ready = 0;
++	adapter.last_native_line = LCD_HEIGHT;
++	gb.hram_io[0x44] = 0;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, -3));
++	gb.hram_io[0x44] = 10;
++	assert(pgb_silver_jp_background(&adapter, &gb, expected, 200, -20, 50));
++	/* Simulate the transient state that previously rejected a single row.
++	 * Also overwrite the live block map and objects: this frame keeps its
++	 * own snapshot and must not mix old anchors with new scene data. */
++	gb.wram[0x114b] = 1;
++	gb.wram[0x106f] = gb.wram[0x1070] = 0;
++	memset(gb.wram + 0x700, 255, 1300);
++	memset(gb.wram + 0x11f0, 0, 13 * 40);
++	gb.hram_io[0x44] = 90;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 50));
++	assert(memcmp(actual, expected, sizeof(actual)) == 0);
++	gb.hram_io[0x44] = 143;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	/* A genuinely invalid NEW frame blanks all margins, including after
++	 * map loading completes halfway through that frame. */
++	gb.hram_io[0x44] = 0;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, -3));
++	gb = *game;
++	gb.hram_io[0x44] = 75;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 75));
++	gb.hram_io[0x44] = 143;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	gb.hram_io[0x44] = 0;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, -3));
++	/* A transient first-line anchor update reuses the scrolling map instead
++	 * of blanking an entire frame; explicit text replacement is not reused. */
++	gb = *game;
++	gb.hram_io[0x44] = 143;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	gb.wram[0x106f] = gb.wram[0x1070] = 0;
++	gb.hram_io[0x44] = 0;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, -3));
++	gb = *game;
++	gb.hram_io[0x44] = 143;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	/* Start-menu font tiles replace low terrain IDs. */
++	for(int sy = 8; sy < 144; sy += 24)
++		for(int sx = 8; sx < 160; sx += 24)
++		{
++			uint8_t bx = (uint8_t)(sx + gb.hram_io[0x43]);
++			uint8_t by = (uint8_t)(sy + gb.hram_io[0x42]);
++			gb.vram[0x1800 + (by >> 3) * 32 + (bx >> 3)] = 0x7f;
++		}
++	gb.hram_io[0x44] = 0;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, -3));
++	gb = *game;
++	gb.hram_io[0x44] = 143;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	gb.hram_io[0x44] = 0;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, -3));
++	/* Interlace can start at line 1 instead of line 0. */
++	gb.hram_io[0x44] = 143;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	gb.wram[0x114b] = 1;
++	gb.hram_io[0x44] = 1;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 1));
++	gb = *game;
++	gb.hram_io[0x44] = 143;
++	assert(!pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 146));
++	gb.hram_io[0x44] = 1;
++	assert(pgb_silver_jp_background(&adapter, &gb, actual, 200, -20, 1));
++	/* A declared, same-tileset map connection may enter before the new
++	 * map's anchors are ready. Retain the complete old snapshot/objects. */
++	for(unsigned int side = 0; side < 4; side++)
++	{
++		if(!source->connections[side].blocks) continue;
++		adapter = *source; gb = *game;
++		unsigned int objects = adapter.object_count;
++		int old_x = objects ? adapter.objects[0].x : 0;
++		int origin = adapter.frame_map.origin_x;
++		gb.wram[0x114b] = 1;
++		gb.wram[0x19c6] = source->connections[side].group;
++		gb.wram[0x19c7] = source->connections[side].number;
++		gb.hram_io[0x43] = adapter.frame_scx + 2;
++		assert(pgb_silver_begin_frame(&adapter, &gb));
++		assert(adapter.frame_map.origin_x == origin + 2);
++		assert(adapter.object_count == objects);
++		if(objects) assert(adapter.objects[0].x == old_x - 2);
++		/* An unrelated warp is still a hard scene transition. */
++		gb.wram[0x19c6] = 0; gb.wram[0x19c7] = 0;
++		assert(!pgb_silver_begin_frame(&adapter, &gb));
++		break;
++	}
++	puts("PASS: frame validity, map blocks and sprite lists stay coherent across transient writes.");
++}
+diff --git a/test/silver_neighbor_tests.h b/test/silver_neighbor_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_neighbor_tests.h
+@@ -0,0 +1,155 @@
++static void silver_neighbor_tests(const struct gb_s *source, const struct silver_test *data)
++{
++	static struct gb_s gb, before;
++	static struct pgb_silver_jp s;
++	gb = *source; s = data->adapter;
++	const struct pgb_silver_connection *route = NULL, *current = NULL;
++	for(unsigned int i = 0; i < s.atlas_count; i++)
++	{
++		if(s.atlas[i].group == 24 && s.atlas[i].number == 3) route = &s.atlas[i];
++		if(s.atlas[i].group == gb.wram[0x19c6] && s.atlas[i].number == gb.wram[0x19c7]) current = &s.atlas[i];
++	}
++	assert(route && current);
++	uint32_t records = 0, base = 0; uint16_t visible = 0;
++	unsigned int count = pgb_silver_region_events(&s, current, &records, &base);
++	assert(count > 0);
++	for(unsigned int i = 0; i < count; i++)
++		assert(memcmp(s.rom + records + i * 13, gb.wram + 0x1438 + (i + 2) * 16 + 1, 13) == 0);
++	assert(pgb_silver_preview_mask(&s, &gb, current, records, count, base, &visible));
++	for(unsigned int i = 0; i < count; i++)
++		assert(!!(visible & (1u << i)) == !gb.wram[0x1538 + i + 2]);
++
++	count = pgb_silver_region_events(&s, route, &records, &base);
++	assert(count == 8);
++	/* Real Route 29 object callback: Tuscany needs Zephyr Badge + Tuesday,
++	 * overriding a stale persistent flag. Projecting it must change no CPU,
++	 * WRAM, OAM, RTC, VRAM, script variable or game RNG state. */
++	for(unsigned int day = 0; day < 7; day++)
++		for(unsigned int badge = 0; badge < 2; badge++)
++		{
++			gb.wram[0x11e5] = day;
++			gb.wram[0x156f] = (gb.wram[0x156f] & 254) | badge;
++			before = gb;
++			assert(pgb_silver_preview_mask(&s, &gb, route, records, count, base, &visible));
++			assert(!!(visible & (1u << 6)) == (day == 2 && badge));
++			assert(memcmp(&before, &gb, sizeof(gb)) == 0);
++		}
++	/* Unknown callback bytecode is never speculatively executed. */
++	static uint8_t changed_rom[1048576];
++	memcpy(changed_rom, s.rom, sizeof(changed_rom));
++	uint32_t script = base + pgb_silver_rom_word(&s, route->attributes + 7);
++	script += 1 + changed_rom[script] * 4;
++	uint32_t callback = 0;
++	for(unsigned int i = 0; i < changed_rom[script]; i++)
++		if(changed_rom[script + 1 + i * 3] == 2)
++			callback = base + pgb_silver_rom_word(&s, script + 2 + i * 3);
++	assert(callback);
++	changed_rom[callback] = 255;
++	const uint8_t *original_rom = s.rom; s.rom = changed_rom;
++	assert(!pgb_silver_preview_mask(&s, &gb, route, records, count, base, &visible));
++	changed_rom[callback] = 3; /* cyclic sjump: bounded projection returns */
++	changed_rom[callback + 1] = (callback - base) & 255;
++	changed_rom[callback + 2] = (callback - base) >> 8;
++	assert(!pgb_silver_preview_mask(&s, &gb, route, records, count, base, &visible));
++	s.rom = original_rom;
++	struct pgb_silver_object variable = {0};
++	assert(!pgb_silver_rom_graphics(&s, &gb, 0xf5, 0, &variable));
++	unsigned int flag = pgb_silver_rom_word(&s, records + 7 * 13 + 11);
++	assert(flag < 0x800);
++	gb.wram[0x17aa + flag / 8] |= 1u << (flag & 7);
++	assert(pgb_silver_preview_mask(&s, &gb, route, records, count, base, &visible));
++	assert(!(visible & (1u << 7))); /* collected item stays hidden */
++	gb.wram[0x17aa + flag / 8] &= ~(1u << (flag & 7));
++	assert(pgb_silver_preview_mask(&s, &gb, route, records, count, base, &visible));
++	assert(visible & (1u << 7));
++	uint8_t timed[13] = {0}; timed[5] = 22; timed[6] = 4;
++	gb.hram_io[0x96] = 23; assert(pgb_silver_event_time(&gb, timed));
++	gb.hram_io[0x96] = 4; assert(pgb_silver_event_time(&gb, timed));
++	gb.hram_io[0x96] = 12; assert(!pgb_silver_event_time(&gb, timed));
++	timed[5] = 255; timed[6] = 4; gb.wram[0x1149] = 2;
++	assert(pgb_silver_event_time(&gb, timed));
++	gb.wram[0x1149] = 1; assert(!pgb_silver_event_time(&gb, timed));
++
++	gb = *source; before = gb; s = data->adapter;
++	pgb_silver_jp_viewport(&s, 1921, 1081); /* headless: no large GUI */
++	pgb_silver_prepare_sprites(&s, &gb, &s.frame_map);
++	assert(memcmp(&before, &gb, sizeof(gb)) == 0);
++	unsigned int resolved = 0, deferred = 0;
++	for(unsigned int region = 0; region < s.atlas_count; region++)
++	{
++		uint32_t at = 0, bank_base = 0; uint16_t mask;
++		unsigned int n = pgb_silver_region_events(&s, &s.atlas[region], &at, &bank_base);
++		if(n && pgb_silver_preview_mask(&s, &gb, &s.atlas[region], at, n, bank_base, &mask)) resolved++;
++		else if(n) deferred++;
++	}
++	printf("Neighbour visibility projections: %u resolved maps, %u conservatively deferred.\n", resolved, deferred);
++	unsigned int previews = 0, teacher = PGB_SILVER_MAX_OBJECTS;
++	for(unsigned int i = 0; i < s.object_count; i++)
++	{
++		const struct pgb_silver_object *a = &s.objects[i];
++		for(unsigned int j = 0; j < i; j++)
++			assert(a->map_group != s.objects[j].map_group || a->map_number != s.objects[j].map_number ||
++				a->map_index != s.objects[j].map_index);
++		if(!a->preview) continue;
++		previews++;
++		assert(!a->live && a->graphics && (a->map_group != s.history_group || a->map_number != s.history_number));
++		if(a->map_group == 24 && a->map_number == 3 && a->map_index == 4) teacher = i;
++	}
++	assert(previews > 0 && teacher < s.object_count);
++	struct pgb_silver_object actor = s.objects[teacher];
++	assert(actor.x + s.frame_map.origin_x == route->x * 32 + 15 * 16);
++	assert(actor.y + s.frame_map.origin_y == route->y * 32 + 11 * 16 - 4);
++
++	/* Crossing x=0/160 must not erase a neighbour in the original image:
++	 * background -> native-copy -> neighbour foreground equals one-pass
++	 * rendering, for partial sprites on both sides of either old edge. */
++	static const int xs[] = {-12,-1,0,148,156,160,168};
++	uint8_t row[224], expected[224], native[160];
++	unsigned int changed = 0;
++	s.objects[0] = actor; s.object_count = 1; s.frame_valid = 1;
++	s.objects[0].y = 32; s.objects[0].grass = s.objects[0].flags = 0;
++	memset(gb.oam, 0, sizeof(gb.oam)); gb.hram_io[0x40] |= 2;
++#if PEANUT_GB_12_COLOUR
++	const uint8_t blank = LCD_PALETTE_BG;
++#else
++	const uint8_t blank = 0;
++#endif
++	for(unsigned int pos = 0; pos < sizeof(xs) / sizeof(*xs); pos++)
++		for(int y = 32; y < 48; y++)
++		{
++			s.objects[0].x = xs[pos];
++			memset(row, blank, sizeof(row)); memset(expected, blank, sizeof(expected));
++			pgb_silver_sprite_row(&s, &gb, &s.frame_map, row, sizeof(row), -32, y);
++			pgb_silver_sprite_row(&s, &gb, &s.frame_map, expected, sizeof(expected), -32, y);
++			memset(row + 32, blank, 160); memcpy(native, row + 32, 160);
++			pgb_silver_jp_foreground(&s, &gb, native, y); memcpy(row + 32, native, 160);
++			assert(memcmp(row, expected, sizeof(row)) == 0);
++			for(unsigned int x = 0; x < 160; x++) changed += native[x] != blank;
++		}
++	assert(changed > 100);
++	/* Native player/objects cannot be covered by a neighbouring preview. */
++	s.objects[0].x = 48;
++	int opaque_x = -1, opaque_y = -1;
++	uint8_t replacement = 0;
++	for(int y = 32; y < 48 && opaque_x < 0; y++)
++	{
++		memset(expected, blank, 160);
++		pgb_silver_sprite_layer(&s, &gb, &s.frame_map, expected, 160, 0, y, 1);
++		for(int x = 48; x < 64; x++)
++			if(expected[x] != blank)
++			{ opaque_x = x; opaque_y = y; replacement = ((expected[x] & 3) + 1) & 3; break; }
++	}
++	assert(opaque_x >= 0);
++	int native_x = opaque_x & ~7;
++	memset(gb.vram, 0, 16); gb.vram[0] = 255;
++	gb.oam[0] = opaque_y + 16; gb.oam[1] = native_x + 8; gb.oam[2] = gb.oam[3] = 0;
++	gb.display.sp_palette[1] = replacement;
++	memset(native, blank, 160);
++	for(int x = native_x; x < native_x + 8; x++) native[x] = replacement;
++	pgb_silver_jp_foreground(&s, &gb, native, opaque_y);
++	for(int x = native_x; x < native_x + 8; x++) assert(native[x] == replacement);
++	s.sprites_enabled = 0;
++	memcpy(expected, native, 160); pgb_silver_jp_foreground(&s, &gb, native, 32);
++	assert(memcmp(expected, native, 160) == 0);
++	printf("PASS: neighbour ROM events/current masks, 14 weekday/badge cases, item/time conditions, %u previews, native-edge composition and player occlusion.\n", previews);
++}
+diff --git a/test/silver_npc_lifecycle_tests.h b/test/silver_npc_lifecycle_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_npc_lifecycle_tests.h
+@@ -0,0 +1,60 @@
++/* Real-ROM regression: repeatedly leave/re-enter the New Bark Fisher's range.
++ * Works on a private emulator/save copy; never changes the outer test or files. */
++static void silver_npc_lifecycle_tests(const struct gb_s *source, const struct silver_test *data)
++{
++	static struct gb_s gb;
++	static struct silver_test p;
++	uint8_t row[200];
++	unsigned int cycles = 0, deleted = 0, respawned = 0, visible_frames = 0;
++	unsigned int missing_visible = 0, blank_frames = 0;
++	int phase = 0, wait = 0, previous_live = 1;
++	gb = *source; p = *data;
++	gb.direct.priv = &p; p.history_only = 0; p.restored_facings = 0;
++	assert(gb_set_lcd_viewport(&gb, 200, 150, row, viewport_line) == 0);
++	assert(gb.wram[0x19c6] == 24 && gb.wram[0x19c7] == 4);
++	for(int frame = 0; frame < 3000 && cycles < 4; frame++)
++	{
++		uint8_t keys = 0xff;
++		if(phase == 0)
++		{
++			if(gb.wram[0x19c9] <= 3) { phase = 1; wait = 30; }
++			else keys &= ~JOYPAD_LEFT;
++		}
++		else if(phase == 1) { if(--wait == 0) phase = 2; }
++		else if(phase == 2)
++		{
++			if(gb.wram[0x19c9] >= 13) { phase = 3; wait = 60; }
++			else keys &= ~JOYPAD_RIGHT;
++		}
++		else if(--wait == 0) { phase = 0; cycles++; }
++		gb.direct.joypad = keys;
++		gb_run_frame(&gb);
++		assert(gb.wram[0x19c6] == 24 && gb.wram[0x19c7] == 4);
++		unsigned int slot = gb.wram[0x1468]; /* map object 3: New Bark Fisher */
++		int live = slot < 13 && gb.wram[0x11f0 + slot * 40] != 0;
++		deleted += previous_live && !live;
++		respawned += !previous_live && live;
++		previous_live = live;
++		blank_frames += !p.adapter.frame_valid;
++		if(!p.adapter.frame_valid) continue;
++		int has_fisher = 0;
++		for(unsigned int i = 0; i < p.adapter.object_count; i++)
++		{
++			const struct pgb_silver_object *o = &p.adapter.objects[i];
++			if(o->map_index != 3) continue;
++			has_fisher = 1;
++			if(o->x + 16 > -20 && o->x < 180 && o->y + 16 > -3 && o->y < 147)
++			{
++				visible_frames++;
++				/* Keep a real NPC alive throughout the enlarged viewport;
++				 * don't hand off to a respawned static record at its edge. */
++				assert(live && o->live);
++			}
++		}
++		missing_visible += !has_fisher;
++	}
++	printf("Fisher lifecycle: cycles=%u unload=%u respawn=%u restored_facings=%u visible_frames=%u missing=%u blank=%u\n",
++		cycles, deleted, respawned, p.restored_facings, visible_frames, missing_visible, blank_frames);
++	assert(cycles == 4 && deleted > 0 && respawned > 0 && p.restored_facings > 0);
++	assert(visible_frames > 100 && missing_visible == 0 && blank_frames == 0);
++}
+diff --git a/test/silver_npc_motion_tests.h b/test/silver_npc_motion_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_npc_motion_tests.h
+@@ -0,0 +1,123 @@
++/* Offscreen screen-space offsets may be one tick ahead of the PPU camera.
++ * Observe the actual first-scanline snapshot, not end-of-frame game RAM. */
++static struct
++{
++	unsigned int stationary, walking, visible;
++	uint16_t width, height;
++} silver_motion_counts;
++
++static void silver_motion_line(struct gb_s *gb, const uint8_t *pixels, uint_fast8_t y)
++{
++	struct silver_test *p = gb->direct.priv;
++	native_line(gb, pixels, y);
++	if(y || !p->adapter.frame_valid || p->adapter.history_group != gb->wram[0x19c6] ||
++		p->adapter.history_number != gb->wram[0x19c7]) return;
++	const struct pgb_silver_map *m = &p->adapter.frame_map;
++	for(unsigned int i = 0; i < p->adapter.object_count; i++)
++	{
++		const struct pgb_silver_object *a = &p->adapter.objects[i];
++		if(!a->live || a->oam_pose || !a->map_index || a->map_index >= 16) continue;
++		unsigned int slot = gb->wram[0x1438 + a->map_index * 16];
++		if(slot >= 13) continue;
++		const uint8_t *o = gb->wram + 0x11f0 + slot * 40;
++		int x = a->x + m->origin_x - pgb_silver_signed(o[25]);
++		int y = a->y + m->origin_y - pgb_silver_signed(o[26]);
++		if(o[7] == 255 && (o[9] < 8 || o[9] == 10 || o[9] == 11))
++		{
++			/* A stationary NPC must never drift in world space when the
++			 * player moves, reverses, crosses a metatile or wraps SCX/SCY. */
++			assert(x == (o[16] + 2) * 16 && y == (o[17] + 2) * 16 - 4);
++			silver_motion_counts.stationary++;
++		}
++		else if((o[9] == 2 || o[9] == 7 || o[9] == 15) && (o[7] & 15) < 12)
++		{
++			int speed = 1 << ((o[7] & 15) >> 2), remaining = o[10] * speed;
++			int dx = (int)o[16] - o[18], dy = (int)o[17] - o[19];
++			if(remaining > 16 || dx < -1 || dx > 1 || dy < -1 || dy > 1 ||
++				(dx == 0 && dy == 0)) continue;
++			/* Independent source-to-target interpolation from LAST_MAP_X/Y,
++			 * including each tick and the final tick, for normal live walks. */
++			assert(x == (o[18] + 2) * 16 + dx * (16 - remaining));
++			assert(y == (o[19] + 2) * 16 - 4 + dy * (16 - remaining));
++			silver_motion_counts.walking++;
++		}
++		else continue;
++		int left = -((int)silver_motion_counts.width - 160) / 2;
++		int top = -((int)silver_motion_counts.height - 144) / 2;
++		if(a->x + 16 > left && a->x < left + silver_motion_counts.width &&
++			a->y + 16 > top && a->y < top + silver_motion_counts.height)
++			silver_motion_counts.visible++;
++	}
++}
++
++/* Use the ROM's actual StepVectors as an independent per-tick oracle. */
++static void silver_npc_walk_vectors_tests(const struct pgb_silver_jp *adapter)
++{
++	static struct gb_s gb;
++	struct pgb_silver_map m = {16,15,0,0,0,0};
++	const unsigned int types[] = {2,7,15};
++	uint8_t *o = gb.wram + 0x11f0 + 40;
++	unsigned int ticks = 0;
++	for(unsigned int type = 0; type < 3; type++)
++		for(unsigned int walking = 0; walking < 12; walking++)
++		{
++			const uint8_t *vector = adapter->rom + 0x46d9 + walking * 4;
++			int vx = pgb_silver_signed(vector[0]), vy = pgb_silver_signed(vector[1]);
++			int duration = vector[2], expected_x = 192 - 3, expected_y = 188 + 5;
++			memset(o, 0, 40);
++			o[7] = walking; o[9] = types[type]; o[25] = 253; o[26] = 5;
++			o[16] = 10 + (vx > 0) - (vx < 0);
++			o[17] = 10 + (vy > 0) - (vy < 0);
++			for(int frame = 0; frame <= duration; frame++)
++			{
++				struct pgb_silver_object object = {0};
++				object.map_index = 1; object.live = 1; object.facing = 4;
++				o[10] = duration - frame;
++				/* Deliberately unrelated screen offsets/anchors; world motion
++				 * must follow the ROM vector with no reversals or snapping. */
++				gb.wram[0xe75] = 255 - frame; gb.wram[0xe76] = frame * 7;
++				m.origin_x = 257 - frame * 17; m.origin_y = 193 + frame * 19;
++				pgb_silver_npc_position(&gb, &m, 1, &object);
++				assert(object.x + m.origin_x == expected_x);
++				assert(object.y + m.origin_y == expected_y);
++				assert(object.facing == 4); /* positioning never resets direction */
++				expected_x += vx; expected_y += vy; ticks++;
++			}
++		}
++	/* Published poses and special scripted motion must keep their raw paths. */
++	struct pgb_silver_object object = {0};
++	object.map_index = 1; object.x = -17; object.y = 181;
++	o[9] = 8; o[7] = 255; /* jump, even in its standing initialization phase */
++	pgb_silver_npc_position(&gb, &m, 1, &object);
++	assert(object.x == -17 && object.y == 181);
++	o[9] = 2; object.oam_pose = 1;
++	pgb_silver_npc_position(&gb, &m, 1, &object);
++	assert(object.x == -17 && object.y == 181);
++	printf("PASS: 36 complete NPC walks (%u ticks) match ROM vectors, offsets, facing and special/OAM guards.\n", ticks);
++}
++
++static void silver_npc_motion_tests(const struct gb_s *source, const struct silver_test *data)
++{
++	static const uint16_t sizes[][2] = {{200,150},{257,193},{320,240},{481,305}};
++	static struct gb_s gb;
++	static struct silver_test p;
++	silver_npc_walk_vectors_tests(&data->adapter);
++	memset(&silver_motion_counts, 0, sizeof(silver_motion_counts));
++	for(unsigned int size = 0; size < sizeof(sizes) / sizeof(*sizes); size++)
++	{
++		gb = *source; p = *data; gb.direct.priv = &p; p.history_only = 1;
++		gb_init_lcd(&gb, silver_motion_line);
++		assert(gb_set_lcd_viewport(&gb, 160, 144, NULL, NULL) == 0);
++		pgb_silver_jp_viewport(&p.adapter, sizes[size][0], sizes[size][1]);
++		silver_motion_counts.width = sizes[size][0]; silver_motion_counts.height = sizes[size][1];
++		for(unsigned int frame = 0; frame < 2400; frame++)
++		{
++			static const uint8_t directions[] = {JOYPAD_LEFT,JOYPAD_UP,JOYPAD_RIGHT,JOYPAD_DOWN};
++			gb.direct.joypad = 0xff & ~directions[(frame / 180) % 4];
++			gb_run_frame(&gb);
++		}
++	}
++	assert(silver_motion_counts.stationary > 100 && silver_motion_counts.visible > 100);
++	printf("PASS: offscreen NPC motion at four sizes: %u stationary, %u walking, %u visible extended poses; no camera drift.\n",
++		silver_motion_counts.stationary, silver_motion_counts.walking, silver_motion_counts.visible);
++}
+diff --git a/test/silver_npc_policy_tests.h b/test/silver_npc_policy_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_npc_policy_tests.h
+@@ -0,0 +1,60 @@
++/* Exact-version ROM-read policy and remembered facing, independent of AI RNG. */
++static void silver_npc_policy_tests(const struct pgb_silver_jp *source)
++{
++	static struct gb_s gb;
++	struct pgb_silver_jp s = *source;
++	struct pgb_silver_map map = {16, 15, 88, 88, 0x18000, 1};
++	uint8_t *record = gb.wram + 0x1448;
++	uint8_t *o = gb.wram + 0x11f0 + 40;
++	const uint32_t patched[] = {0x4397,0x43c3,0x878d,0x439c,0x43c8,0x8792,
++		0x43a9,0x43d5,0x879b,0x43ae,0x43da,0x87a0,0x9675a};
++	memset(&gb, 0, sizeof(gb));
++	memset(s.npc, 0, sizeof(s.npc));
++	gb.wram[0x19c6] = 24; gb.wram[0x19c7] = 4;
++	record[0] = 1; record[1] = 41; record[2] = 5; record[3] = 3; record[4] = 4;
++	o[0] = 41; o[1] = 1; o[2] = 32; o[11] = 1; o[13] = 4; o[8] = 4;
++	o[16] = 3; o[17] = 5; o[23] = 248; o[24] = 24;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.npc[1].valid && s.npc[1].direction == 4);
++	/* Unload: retain last world position and UP, not the default DOWN. */
++	record[0] = 255; o[0] = 0;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 1 && s.objects[0].facing == 4);
++	assert(s.objects[0].x == -8 && s.objects[0].y == 20);
++	/* New live slot exists but hasn't published a pose yet: no missing frame. */
++	record[0] = 1; o[0] = 41; o[9] = 0; o[13] = 255; o[8] = 0;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 1 && s.objects[0].facing == 4);
++	pgb_silver_jp_viewport(&s, 200, 150);
++	assert(s.pad_x == 2 && s.pad_y == 1);
++	unsigned int changes = 0;
++	for(uint32_t at = 0; at < s.rom_size; at++)
++	{
++		uint8_t value = pgb_silver_jp_rom_read(&s, &gb, at);
++		if(value == s.rom[at]) continue;
++		int allowed = 0;
++		for(unsigned int i = 0; i < sizeof(patched) / sizeof(*patched); i++) allowed |= at == patched[i];
++		assert(allowed); changes++;
++	}
++	assert(changes == sizeof(patched) / sizeof(*patched));
++	/* Only the actual initial-facing CPU read can restore cached UP. */
++	gb.cpu_reg.pc.reg = 0x18d1;
++	gb.wram[0xe8d] = 1; gb.wram[0xe8e] = 41; gb.wram[0xe91] = 4;
++	assert(s.rom[0x4275 + 4 * 6] == 0);
++	assert(pgb_silver_jp_rom_read(&s, &gb, 0x4275 + 4 * 6) == 1);
++	gb.cpu_reg.pc.reg++;
++	assert(pgb_silver_jp_rom_read(&s, &gb, 0x4275 + 4 * 6) == 0);
++	gb.cpu_reg.pc.reg = 0x18d1;
++	gb.wram[0x1539] = 255;
++	assert(pgb_silver_jp_rom_read(&s, &gb, 0x4275 + 4 * 6) == 0);
++	gb.wram[0x1539] = 0;
++	gb.wram[0x19c7] = 5;
++	assert(pgb_silver_jp_rom_read(&s, &gb, 0x4275 + 4 * 6) == 0);
++	gb.wram[0x19c7] = 4;
++	record[4] = 5;
++	assert(pgb_silver_jp_rom_read(&s, &gb, 0x4275 + 4 * 6) == 0);
++	pgb_silver_jp_viewport(&s, 160, 144);
++	for(unsigned int i = 0; i < sizeof(patched) / sizeof(*patched); i++)
++		assert(pgb_silver_jp_rom_read(&s, &gb, patched[i]) == s.rom[patched[i]]);
++	puts("PASS: unload/respawn facing continuity, hidden/identity guards and exact ROM-read overlay.");
++}
+diff --git a/test/silver_npc_wrap_tests.h b/test/silver_npc_wrap_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_npc_wrap_tests.h
+@@ -0,0 +1,67 @@
++/* Real-ROM regression: an expanded AI range must never publish a distant
++ * NPC at its modulo-256 position on the opposite native-screen edge.
++ * Clone an already running game; no GUI or save-file writes. */
++static void silver_npc_wrap_tests(const struct gb_s *source, const struct silver_test *data)
++{
++	static const uint16_t sizes[][2] = {
++		{200,150}, {257,193}, {320,240}, {481,305}, {640,480}, {961,721}
++	};
++	static struct gb_s gb;
++	static struct silver_test p;
++	unsigned int checked = 0, distant = 0;
++	/* Only CP's operand may change, at the exact data-fetch PC. */
++	gb = *source; p = *data; gb.direct.priv = &p;
++	gb.cpu_reg.bc.reg = 0xd1f0 + 40;
++	uint8_t *o = gb.wram + 0x11f0 + 40;
++	o[0] = 41; o[13] = 4; o[16] = 1; o[23] = 0;
++	o[17] = 1; o[24] = 0;
++	pgb_silver_jp_viewport(&p.adapter, 320, 240);
++	gb.cpu_reg.pc.reg = 0x5930;
++	assert(pgb_silver_jp_rom_read(&p.adapter, &gb, 0x592f) == 4);
++	assert(pgb_silver_jp_rom_read(&p.adapter, &gb, 0x5930) == p.rom[0x5930]);
++	gb.cpu_reg.pc.reg++;
++	assert(pgb_silver_jp_rom_read(&p.adapter, &gb, 0x592f) == 255);
++	gb.cpu_reg.pc.reg = 0x5930; gb.cpu_reg.bc.reg++;
++	assert(pgb_silver_jp_rom_read(&p.adapter, &gb, 0x592f) == 255);
++	gb.cpu_reg.bc.reg--; pgb_silver_jp_viewport(&p.adapter, 160, 144);
++	assert(pgb_silver_jp_rom_read(&p.adapter, &gb, 0x592f) == 255);
++	for(unsigned int size = 0; size < sizeof(sizes) / sizeof(*sizes); size++)
++	{
++		gb = *source; p = *data; gb.direct.priv = &p;
++		p.history_only = 1;
++		gb_init_lcd(&gb, native_line);
++		/* Exercise the game policy without needing a large display buffer. */
++		assert(gb_set_lcd_viewport(&gb, 160, 144, NULL, NULL) == 0);
++		pgb_silver_jp_viewport(&p.adapter, sizes[size][0], sizes[size][1]);
++		for(unsigned int frame = 0; frame < 1800; frame++)
++		{
++			gb.direct.joypad = 0xff & ~((frame / 300) % 2 ? JOYPAD_LEFT : JOYPAD_RIGHT);
++			gb_run_frame(&gb);
++			if(!p.adapter.frame_valid) continue;
++			for(unsigned int i = 0; i < p.adapter.object_count; i++)
++			{
++				const struct pgb_silver_object *o = &p.adapter.objects[i];
++				if(!o->live || o->map_index == 0) continue;
++				checked++;
++				if(o->x >= -16 && o->x < 160 && o->y >= -16 && o->y < 144) continue;
++				distant++;
++				if(!o->oam_pose) continue;
++				unsigned int at = pgb_silver_rom_word(&p.adapter, 0x404a + o->facing * 2);
++				unsigned int n = p.adapter.rom[at++];
++				for(unsigned int part = 0; part < n; part++, at += 4)
++				{
++					int x = o->x + pgb_silver_signed(p.adapter.rom[at + 1]);
++					int y = o->y + pgb_silver_signed(p.adapter.rom[at]);
++					int wrapped_x = (uint8_t)(x + 8) - 8;
++					int wrapped_y = (uint8_t)(y + 16) - 16;
++					/* Each published part must have its actual map position;
++					 * wrapping may never create an extra native-screen pixel. */
++					if(wrapped_x > -8 && wrapped_x < 160 && wrapped_y > -8 && wrapped_y < 144)
++						assert(x == wrapped_x && y == wrapped_y);
++				}
++			}
++		}
++	}
++	assert(checked > 1000 && distant > 1000);
++	printf("PASS: NPC coordinate-wrap regression at six viewport sizes; %u live poses, %u distant poses.\n", checked, distant);
++}
+diff --git a/test/silver_sprite_tests.h b/test/silver_sprite_tests.h
+new file mode 100644
+--- /dev/null
++++ b/test/silver_sprite_tests.h
+@@ -0,0 +1,121 @@
++/* Synthetic presentation tests using the user's ROM tables, never ROM files. */
++static void silver_sprite_tests(const struct pgb_silver_jp *source, uint8_t *rom)
++{
++	static struct gb_s gb;
++	struct pgb_silver_jp s = *source;
++	struct pgb_silver_map map = {16, 15, 88, 88, 0x18000, 1};
++	uint8_t pixels[200], reference[200];
++	uint8_t *o = gb.wram + 0x11f0 + 40;
++	const uint8_t bg =
++#if PEANUT_GB_12_COLOUR
++		LCD_PALETTE_BG;
++#else
++		0;
++#endif
++	memset(&gb, 0, sizeof(gb));
++	gb.hram_io[0x40] = 0xe3;
++	for(int i = 0; i < 4; i++)
++	{
++		gb.display.bg_palette[i] = i;
++		gb.display.sp_palette[i] = i;
++		gb.display.sp_palette[i + 4] = 3 - i;
++	}
++	o[0] = 1; o[1] = 1; o[2] = 32; o[11] = 1;
++	o[16] = 3; o[17] = 5; o[23] = 248; o[24] = 24;
++	/* Exactly one opaque 8x8 piece outside the native screen at x=-8. */
++	for(int y = 0; y < 8; y++) gb.vram[32 * 16 + y * 2 + 1] = 255;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 1 && s.objects[0].x == -8 && s.objects[0].y == 20);
++	memset(pixels, bg, sizeof(pixels));
++	assert(pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20) == 8);
++	for(int x = 0; x < 200; x++) assert(pixels[x] == (x >= 12 && x < 20 ? 2 : bg));
++	/* OBP1 is selected after transparency; colour zero must stay transparent. */
++	o[5] = 0x10;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	memset(pixels, bg, sizeof(pixels));
++	pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20);
++	assert(pixels[12] == (1 | (PEANUT_GB_12_COLOUR ? 0x10 : 0)) && pixels[20] == bg);
++	/* Same-X priority: first object wins; transparent pixels expose the next. */
++	o[5] = 0;
++	memcpy(o + 40, o, 40); o[40 + 1] = 2; o[40 + 2] = 48;
++	for(int y = 0; y < 8; y++) gb.vram[48 * 16 + y * 2] = 255;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	memset(pixels, bg, sizeof(pixels));
++	pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20);
++	assert(pixels[12] == 2);
++	memset(gb.vram + 32 * 16, 0, 16);
++	memset(pixels, bg, sizeof(pixels));
++	pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20);
++	assert(pixels[12] == 1);
++	/* A priority OBJ hidden by BG must also hide lower-priority objects.
++	 * BG shade 3 maps to colour 0 here: priority must use RAW BG shade. */
++	memset(gb.vram + 0x800, 255, VRAM_SIZE - 0x800);
++	gb.display.bg_palette[3] = 0;
++	for(int y = 0; y < 8; y++) gb.vram[32 * 16 + y * 2 + 1] = 255;
++	o[5] = 0x80;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	memset(pixels, 3 | bg, sizeof(pixels));
++	pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20);
++	assert(pixels[12] == bg);
++	memset(o + 40, 0, 40); o[5] = 0;
++	/* Offscreen-cull pose can be recovered, explicit invisibility cannot. */
++	o[13] = 255; o[5] = 0x40;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 1 && s.objects[0].facing == 0);
++	o[4] = 1;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 0);
++	o[4] = 0; o[5] = 0; o[13] = 12; /* facing right flips each piece */
++	memset(gb.vram, 0, sizeof(gb.vram));
++	gb.vram[40 * 16] = 0x80;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	memset(pixels, bg, sizeof(pixels));
++	pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20);
++	assert(pixels[27] == 1 && pixels[20] == bg);
++	/* Exercise Y flip with a locally modified facing record, then restore it. */
++	o[13] = 0;
++	gb.vram[32 * 16] = 255;
++	gb.vram[32 * 16 + 14] = 0; gb.vram[32 * 16 + 15] = 255;
++	rom[0x408f] = 0x40;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	memset(pixels, bg, sizeof(pixels));
++	pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20);
++	assert(pixels[12] == 2);
++	rom[0x408f] = 0;
++	/* Unspawned NPC: render ROM graphics even when its tiles aren't loaded.
++	 * Compare this to the same sprite after loading those exact tiles to VRAM. */
++	memset(gb.wram + 0x11f0, 0, 13 * 40);
++	uint8_t *m = gb.wram + 0x1448;
++	m[0] = 255; m[1] = 41; m[2] = 5; m[3] = 3; m[4] = 6;
++	for(unsigned int sprite_case = 0; sprite_case < 3; sprite_case++)
++	{
++		m[1] = sprite_case == 0 ? 41 : sprite_case == 1 ? 0x80 : 0xf0;
++		gb.wram[0x1548] = 41; /* variable sprite resolves without recursion loops */
++		memset(gb.wram + 0x104f, 0, 24);
++		pgb_silver_prepare_sprites(&s, &gb, &map);
++		assert(s.object_count == 1 && s.objects[0].graphics > 0);
++		uint32_t graphics = s.objects[0].graphics;
++		unsigned int tiles = s.objects[0].tiles;
++		memset(reference, bg, sizeof(reference));
++		assert(pgb_silver_sprite_row(&s, &gb, &map, reference, 200, -20, 24) > 0);
++		gb.wram[0x1051] = m[1]; gb.wram[0x1052] = 32;
++		memcpy(gb.vram + 32 * 16, rom + graphics, tiles * 16);
++		pgb_silver_prepare_sprites(&s, &gb, &map);
++		assert(pgb_silver_object(&s, &gb, &map, 13, &s.objects[0]));
++		assert(s.object_count == 1 && s.objects[0].graphics == 0);
++		memset(pixels, bg, sizeof(pixels));
++		pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 24);
++		assert(memcmp(pixels, reference, sizeof(pixels)) == 0);
++	}
++	gb.wram[0x1539] = 255; /* time/event mask must suppress dormant objects */
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 0);
++	gb.wram[0x1539] = 0;
++	m[0] = 1; o[0] = m[1]; o[1] = 1; o[4] = 1;
++	pgb_silver_prepare_sprites(&s, &gb, &map);
++	assert(s.object_count == 0); /* don't resurrect an invisible live NPC */
++	s.sprites_enabled = 0;
++	memset(pixels, bg, sizeof(pixels));
++	assert(pgb_silver_sprite_row(&s, &gb, &map, pixels, 200, -20, 20) == 0);
++	puts("PASS: offscreen sprites, ROM/VRAM graphics, flips, transparency, priority and hidden masks.");
++}

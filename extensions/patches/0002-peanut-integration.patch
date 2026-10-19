@@ -1,0 +1,590 @@
+diff --git a/peanut_gb.h b/peanut_gb.h
+--- a/peanut_gb.h
++++ b/peanut_gb.h
+@@ -683,11 +683,18 @@
+ 		 * 			the Game Boy Color (CGB) does to DMG
+ 		 * 			games.
+ 		 * \param line		Line to draw pixels on. This is
+-		 * guaranteed to be between 0-144 inclusive.
++		 * guaranteed to be between 0-143 inclusive.
+ 		 */
+ 		void (*lcd_draw_line)(struct gb_s *gb,
+ 				const uint8_t *pixels,
+ 				const uint_fast8_t line);
++
++		/* Optional presentation viewport; never changes hardware timing. */
++		uint16_t viewport_width, viewport_height;
++		uint8_t *viewport_row;
++		void (*viewport_draw_line)(struct gb_s *, const uint8_t *, uint16_t);
++		/* Optional game-aware presentation background (native pixel coordinates). */
++		void (*viewport_background)(struct gb_s *, uint8_t *, uint16_t, int32_t, int32_t);
+ 
+ 		/* Palettes */
+ 		uint8_t bg_palette[4];
+@@ -1459,12 +1466,71 @@
+ }
+ #endif
+ 
++/* Draw only BG outside the native LCD. Coordinates wrap in the 256x256 map. */
++static void __gb_viewport_bg(struct gb_s *gb, uint16_t line)
++{
++	uint32_t x;
++	int32_t left = (gb->display.viewport_width - LCD_WIDTH) / 2;
++	int32_t top = (gb->display.viewport_height - LCD_HEIGHT) / 2;
++	uint8_t y = (uint8_t)((int32_t)line - top + gb->hram_io[IO_SCY]);
++	uint16_t map = ((gb->hram_io[IO_LCDC] & LCDC_BG_MAP) ?
++		VRAM_BMAP_2 : VRAM_BMAP_1) + (y >> 3) * 32;
++	for(x = 0; x < gb->display.viewport_width; x++)
++	{
++		uint8_t colour = 0;
++		if(gb->hram_io[IO_LCDC] & LCDC_BG_ENABLE)
++		{
++			uint8_t bx = (uint8_t)((int32_t)x - left + gb->hram_io[IO_SCX]);
++			uint8_t idx = gb->vram[map + (bx >> 3)];
++			uint16_t tile = (gb->hram_io[IO_LCDC] & LCDC_TILE_SELECT) ?
++				VRAM_TILES_1 + idx * 16 :
++				VRAM_TILES_2 + ((idx + 128) % 256) * 16;
++			uint8_t shift = 7 - (bx & 7);
++			tile += (y & 7) * 2;
++			colour = gb->display.bg_palette[((gb->vram[tile] >> shift) & 1) |
++				(((gb->vram[tile + 1] >> shift) & 1) << 1)];
++#if PEANUT_GB_12_COLOUR
++			colour |= LCD_PALETTE_BG;
++#endif
++		}
++		gb->display.viewport_row[x] = colour;
++	}
++	if(gb->display.viewport_background != NULL)
++		gb->display.viewport_background(gb, gb->display.viewport_row,
++			gb->display.viewport_width, -left, (int32_t)line - top);
++}
++
++static void __gb_viewport_line(struct gb_s *gb, const uint8_t *native)
++{
++	uint16_t top = (gb->display.viewport_height - LCD_HEIGHT) / 2;
++	uint16_t left = (gb->display.viewport_width - LCD_WIDTH) / 2;
++	uint16_t row = top + gb->hram_io[IO_LY];
++	uint32_t y;
++	/* Sample top margin with line 0 state, bottom margin with line 143 state. */
++	if(gb->hram_io[IO_LY] == 0)
++		for(y = 0; y < top; y++)
++		{
++			__gb_viewport_bg(gb, (uint16_t)y);
++			gb->display.viewport_draw_line(gb, gb->display.viewport_row, (uint16_t)y);
++		}
++	if(left || gb->display.viewport_width != LCD_WIDTH)
++		__gb_viewport_bg(gb, row);
++	memcpy(gb->display.viewport_row + left, native, LCD_WIDTH);
++	gb->display.viewport_draw_line(gb, gb->display.viewport_row, row);
++	if(gb->hram_io[IO_LY] == LCD_HEIGHT - 1)
++		for(y = row + 1; y < gb->display.viewport_height; y++)
++		{
++			__gb_viewport_bg(gb, (uint16_t)y);
++			gb->display.viewport_draw_line(gb, gb->display.viewport_row, (uint16_t)y);
++		}
++}
++
+ void __gb_draw_line(struct gb_s *gb)
+ {
+ 	uint8_t pixels[160] = {0};
+ 
+ 	/* If LCD not initialised by front-end, don't render anything. */
+-	if(gb->display.lcd_draw_line == NULL)
++	if(gb->display.lcd_draw_line == NULL && gb->display.viewport_draw_line == NULL)
+ 		return;
+ 
+ 	if(gb->direct.frame_skip && !gb->display.frame_skip_count)
+@@ -1781,7 +1847,10 @@
+ 		}
+ 	}
+ 
+-	gb->display.lcd_draw_line(gb, pixels, gb->hram_io[IO_LY]);
++	if(gb->display.lcd_draw_line != NULL)
++		gb->display.lcd_draw_line(gb, pixels, gb->hram_io[IO_LY]);
++	if(gb->display.viewport_draw_line != NULL)
++		__gb_viewport_line(gb, pixels);
+ }
+ #endif
+ 
+@@ -3792,6 +3861,8 @@
+ 
+ 	gb->lcd_blank = false;
+ 	gb->display.lcd_draw_line = NULL;
++	gb->display.viewport_draw_line = NULL;
++	gb->display.viewport_background = NULL;
+ 
+ 	gb_reset(gb);
+ 
+@@ -3823,6 +3894,29 @@
+ }
+ 
+ #if ENABLE_LCD
++void gb_set_lcd_background(struct gb_s *gb,
++		void (*background)(struct gb_s *, uint8_t *, uint16_t, int32_t, int32_t))
++{
++	gb->display.viewport_background = background;
++}
++
++int gb_set_lcd_viewport(struct gb_s *gb, uint16_t width, uint16_t height,
++		uint8_t *row, void (*draw_line)(struct gb_s *, const uint8_t *, uint16_t))
++{
++	if(draw_line == NULL)
++	{
++		gb->display.viewport_draw_line = NULL;
++		return 0;
++	}
++	if(width < LCD_WIDTH || height < LCD_HEIGHT || row == NULL)
++		return -1;
++	gb->display.viewport_width = width;
++	gb->display.viewport_height = height;
++	gb->display.viewport_row = row;
++	gb->display.viewport_draw_line = draw_line;
++	return 0;
++}
++
+ void gb_init_lcd(struct gb_s *gb,
+ 		void (*lcd_draw_line)(struct gb_s *gb,
+ 			const uint8_t *pixels,
+@@ -3919,6 +4013,30 @@
+  */
+ void gb_reset(struct gb_s *gb);
+ 
++#if ENABLE_LCD
++/** Optional presentation-only BG override. Called after generic BG rendering,
++ * before the native LCD pixels are composited. Receives a writable width-byte
++ * row and its native screen x/y origin (possibly negative). It must not mutate
++ * emulated state. NULL restores generic background. Configure between frames.
++ */
++void gb_set_lcd_background(struct gb_s *gb,
++		void (*background)(struct gb_s *, uint8_t *, uint16_t, int32_t, int32_t));
++
++/** Configure an optional centered BG-only extension, without changing PPU timing.
++ * width/height must be >= 160/144. Odd margins put the extra pixel right/bottom.
++ * row is caller-owned storage of at least width bytes, valid until disabled.
++ * draw_line receives width pixels and a row in [0,height); consume immediately.
++ * Native LCD callbacks still receive the unchanged 160x144 image. NULL draw_line
++ * disables the viewport. Returns -1 on invalid arguments (configuration unchanged).
++ * No allocation is performed. Configure between frames; gb_reset preserves this.
++ * Margins use the first/last rendered native line's VRAM/register/palette state.
++ * Frame skip/interlace also apply to this callback. No extra sprites or Window.
++ */
++int gb_set_lcd_viewport(struct gb_s *gb, uint16_t width, uint16_t height,
++		uint8_t *row, void (*draw_line)(struct gb_s *, const uint8_t *, uint16_t));
++
++#endif
++
+ /**
+  * Initialises the display context of the emulator. Only available when
+  * ENABLE_LCD is defined to a non-zero value.
+@@ -3931,7 +4049,7 @@
+  *
+  * \param gb	An initialised emulator context. Must not be NULL.
+  * \param lcd_draw_line Pointer to function that draws the 2-bit pixel data on the line
+- *		"line". Must not be NULL.
++ *		"line". NULL disables native output; viewport output is independent.
+  */
+ #if ENABLE_LCD
+ void gb_init_lcd(struct gb_s *gb,
+diff --git a/examples/sdl2/peanut_sdl.c b/examples/sdl2/peanut_sdl.c
+--- a/examples/sdl2/peanut_sdl.c
++++ b/examples/sdl2/peanut_sdl.c
+@@ -21,6 +21,7 @@
+ void audio_write(uint16_t addr, uint8_t val);
+ 
+ #include "../../peanut_gb.h"
++#include "../common/pokemon_silver_jp.h"
+ 
+ enum {
+ 	LOG_CATERGORY_PEANUTSDL = SDL_LOG_CATEGORY_CUSTOM
+@@ -42,7 +43,11 @@
+ 
+ 	/* Colour palette for each BG, OBJ0, and OBJ1. */
+ 	uint16_t selected_palette[3][4];
+-	uint16_t fb[LCD_HEIGHT][LCD_WIDTH];
++	uint16_t *fb;
++	uint8_t *viewport_row;
++	uint16_t width, height;
++	size_t rom_size;
++	struct pgb_silver_jp silver;
+ };
+ 
+ static struct minigb_apu_ctx apu;
+@@ -53,7 +58,7 @@
+ uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr)
+ {
+ 	const struct priv_t * const p = gb->direct.priv;
+-	return p->rom[addr];
++	return p->silver.supported ? pgb_silver_jp_rom_read(&p->silver, gb, addr) : p->rom[addr];
+ }
+ 
+ /**
+@@ -558,58 +563,75 @@
+ }
+ 
+ #if ENABLE_LCD
+-/**
+- * Draws scanline into framebuffer.
+- */
+-void lcd_draw_line(struct gb_s *gb, const uint8_t pixels[160],
+-		   const uint_fast8_t line)
++/* Game-specific terrain is presentation-only; invalid scenes have blank margins. */
++static void silver_background(struct gb_s *gb, uint8_t *pixels, uint16_t width,
++		int32_t x, int32_t y)
+ {
+ 	struct priv_t *priv = gb->direct.priv;
+-
+-	for(unsigned int x = 0; x < LCD_WIDTH; x++)
+-	{
+-		priv->fb[line][x] = priv->selected_palette
+-				    [(pixels[x] & LCD_PALETTE_ALL) >> 4]
+-				    [pixels[x] & 3];
+-	}
++	if(!pgb_silver_jp_margins(&priv->silver, gb, pixels, width, x, y))
++		memset(pixels, 0, width);
++}
++
++/* Viewport pixels use the same shade/layer format as native LCD pixels. */
++static void viewport_draw_line(struct gb_s *gb, const uint8_t *pixels, uint16_t line)
++{
++	struct priv_t *priv = gb->direct.priv;
++	unsigned int x;
++	uint8_t composed[160];
++	unsigned int left = (priv->width - 160) / 2, top = (priv->height - 144) / 2;
++	int native_row = line >= top && line < top + 144;
++	if(native_row)
++	{
++		memcpy(composed, pixels + left, sizeof(composed));
++		pgb_silver_jp_foreground(&priv->silver, gb, composed, line - top);
++	}
++	for(x = 0; x < priv->width; x++)
++	{
++		uint8_t colour = native_row && x >= left && x < left + 160 ? composed[x - left] : pixels[x];
++		priv->fb[(size_t)line * priv->width + x] = priv->selected_palette
++			[(colour & LCD_PALETTE_ALL) >> 4][colour & 3];
++	}
++}
++
++static int set_viewport(struct gb_s *gb, struct priv_t *priv,
++		SDL_Renderer *renderer, SDL_Texture **texture, uint16_t width, uint16_t height)
++{
++	SDL_Texture *next = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB555,
++		SDL_TEXTUREACCESS_STREAMING, width, height);
++	if(next == NULL)
++		return -1;
++	SDL_DestroyTexture(*texture);
++	*texture = next;
++	priv->width = width;
++	priv->height = height;
++	memset(priv->fb, 0, (size_t)width * height * sizeof(*priv->fb));
++	pgb_silver_jp_viewport(&priv->silver, width, height);
++	gb_set_lcd_viewport(gb, width, height, priv->viewport_row, viewport_draw_line);
++	SDL_RenderSetLogicalSize(renderer, width, height);
++	SDL_SetWindowMinimumSize(priv->win, width, height);
++	SDL_SetWindowSize(priv->win, width, height);
++	return 0;
+ }
+ #endif
+ 
+ /**
+  * Saves the LCD screen as a 15-bit BMP file.
+  */
+-int save_lcd_bmp(struct gb_s* gb, uint16_t fb[LCD_HEIGHT][LCD_WIDTH])
+-{
+-	/* Should be enough to record up to 828 days worth of frames. */
+-	static uint_fast32_t file_num = 0;
+-	char file_name[32];
+-	char title_str[16];
+-	SDL_RWops *f;
+-	int ret = -1;
+-
+-	SDL_snprintf(file_name, 32, "%.16s_%010ld.bmp",
+-		 gb_get_rom_name(gb, title_str), file_num);
+-
+-	f = SDL_RWFromFile(file_name, "wb");
+-	if(f == NULL)
+-		goto ret;
+-
+-	const uint8_t bmp_hdr_rgb555[] = {
+-		0x42, 0x4d, 0x36, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-		0x36, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0xa0, 0x00,
+-		0x00, 0x00, 0x70, 0xff, 0xff, 0xff, 0x01, 0x00, 0x10, 0x00,
+-		0x00, 0x00, 0x00, 0x00, 0x00, 0xb4, 0x00, 0x00, 0x00, 0x00,
+-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-		0x00, 0x00, 0x00, 0x00
+-	};
+-
+-	SDL_RWwrite(f, bmp_hdr_rgb555, sizeof(uint8_t), sizeof(bmp_hdr_rgb555));
+-	SDL_RWwrite(f, fb, sizeof(uint16_t), LCD_HEIGHT * LCD_WIDTH);
+-	ret = SDL_RWclose(f);
+-
+-	file_num++;
+-
+-ret:
++int save_lcd_bmp(struct gb_s *gb, uint16_t *fb)
++{
++	static unsigned int file_num;
++	struct priv_t *priv = gb->direct.priv;
++	char file_name[64], title_str[17];
++	SDL_Surface *surface;
++	int ret;
++	SDL_snprintf(file_name, sizeof(file_name), "%.16s_%010u.bmp",
++		gb_get_rom_name(gb, title_str), file_num++);
++	surface = SDL_CreateRGBSurfaceFrom(fb, priv->width, priv->height, 16,
++		priv->width * sizeof(*fb), 0x7c00, 0x03e0, 0x001f, 0);
++	if(surface == NULL)
++		return -1;
++	ret = SDL_SaveBMP(surface, file_name);
++	SDL_FreeSurface(surface);
+ 	return ret;
+ }
+ 
+@@ -625,7 +647,7 @@
+ 	double speed_compensation = 0.0;
+ 	SDL_Window *window;
+ 	SDL_Renderer *renderer;
+-	SDL_Texture *texture;
++	SDL_Texture *texture = NULL;
+ 	SDL_Event event;
+ 	SDL_GameController *controller = NULL;
+ 	uint_fast32_t new_ticks, old_ticks;
+@@ -638,6 +660,82 @@
+ 	char *rom_file_name = NULL;
+ 	char *save_file_name = NULL;
+ 	int ret = EXIT_SUCCESS;
++	unsigned int viewport_width = 160, viewport_height = 160;
++	unsigned int frame_limit = 0, frames = 0;
++	unsigned int extension_features = PGB_SILVER_DEFAULT_FEATURES;
++	unsigned int extension_objects = PGB_SILVER_MAX_OBJECTS;
++	int expanded = 0, raw_background = 0, terrain_only = 0;
++	/* Remove presentation options before the existing ROM/SAVE argument parser. */
++	for(int i = 1; i < argc;)
++	{
++		int consumed = 0;
++		if((strcmp(argv[i], "--extension-features") == 0 ||
++			strcmp(argv[i], "--extension-objects") == 0) && i + 1 < argc)
++		{
++			char *end;
++			unsigned long value = strtoul(argv[i + 1], &end, 0);
++			unsigned long max = strcmp(argv[i], "--extension-features") == 0 ?
++				PGB_SILVER_ALL : PGB_SILVER_MAX_OBJECTS;
++			if(!argv[i + 1][0] || *end || value > max) return EXIT_FAILURE;
++			if(strcmp(argv[i], "--extension-features") == 0) extension_features = (unsigned int)value;
++			else extension_objects = (unsigned int)value;
++			consumed = 2;
++		}
++		else if(strcmp(argv[i], "--terrain-only") == 0)
++		{
++			terrain_only = 1;
++			consumed = 1;
++		}
++		else if(strcmp(argv[i], "--raw-background") == 0)
++		{
++			raw_background = 1;
++			consumed = 1;
++		}
++		else if(strcmp(argv[i], "--viewport") == 0 && i + 1 < argc)
++		{
++			char tail;
++			if(sscanf(argv[i + 1], "%ux%u%c", &viewport_width, &viewport_height, &tail) != 2 ||
++				viewport_width < LCD_WIDTH || viewport_height < LCD_HEIGHT ||
++				viewport_width > 65535 || viewport_height > 65535)
++			{
++				fprintf(stderr, "Viewport must be WIDTHxHEIGHT, at least 160x144, at most 65535x65535.\n");
++				return EXIT_FAILURE;
++			}
++			expanded = 1;
++			consumed = 2;
++		}
++		else if(strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
++		{
++			char tail;
++			if(sscanf(argv[i + 1], "%u%c", &frame_limit, &tail) != 1 || frame_limit == 0)
++				return EXIT_FAILURE;
++			consumed = 2;
++		}
++		if(consumed)
++		{
++			for(int j = i; j + consumed < argc; j++)
++				argv[j] = argv[j + consumed];
++			argc -= consumed;
++			argv[argc] = NULL;
++		}
++		else
++			i++;
++	}
++	if(!pgb_silver_jp_configure(&priv.silver, extension_features, extension_objects))
++	{
++		fprintf(stderr, "Invalid extension feature dependencies or object budget. See extensions/README.md.\n");
++		return EXIT_FAILURE;
++	}
++	priv.width = expanded ? viewport_width : LCD_WIDTH;
++	priv.height = expanded ? viewport_height : LCD_HEIGHT;
++	priv.fb = calloc((size_t)viewport_width * viewport_height, sizeof(*priv.fb));
++	priv.viewport_row = malloc(viewport_width);
++	if(priv.fb == NULL || priv.viewport_row == NULL)
++	{
++		free(priv.fb);
++		free(priv.viewport_row);
++		return EXIT_FAILURE;
++	}
+ 
+ 	SDL_LogSetPriority(LOG_CATERGORY_PEANUTSDL, SDL_LOG_PRIORITY_INFO);
+ 
+@@ -660,7 +758,7 @@
+ 	window = SDL_CreateWindow("Peanut-SDL: Opening File",
+ 			SDL_WINDOWPOS_CENTERED,
+ 			SDL_WINDOWPOS_CENTERED,
+-			LCD_WIDTH * 2, LCD_HEIGHT * 2,
++			priv.width, priv.height,
+ 			SDL_WINDOW_RESIZABLE | SDL_WINDOW_INPUT_FOCUS);
+ 
+ 	if(window == NULL)
+@@ -717,14 +815,14 @@
+ #if ENABLE_FILE_GUI
+ 		SDL_LogMessage(LOG_CATERGORY_PEANUTSDL,
+ 				SDL_LOG_PRIORITY_CRITICAL,
+-				"Usage: %s [ROM] [SAVE]", argv[0]);
++				"Usage: %s [--viewport WIDTHxHEIGHT] [--raw-background] [--terrain-only] [--frames N] [--extension-features MASK] [--extension-objects N] [ROM] [SAVE]", argv[0]);
+ 		SDL_LogMessage(LOG_CATERGORY_PEANUTSDL,
+ 				SDL_LOG_PRIORITY_CRITICAL,
+ 				"A file picker is presented if ROM is not given.");
+ #else
+ 		SDL_LogMessage(LOG_CATERGORY_PEANUTSDL,
+ 				SDL_LOG_PRIORITY_CRITICAL,
+-				"Usage: %s ROM [SAVE]\n", argv[0]);
++				"Usage: %s [--viewport WIDTHxHEIGHT] [--raw-background] [--terrain-only] [--frames N] [--extension-features MASK] [--extension-objects N] ROM [SAVE]\n", argv[0]);
+ #endif
+ 		SDL_LogMessage(LOG_CATERGORY_PEANUTSDL,
+ 				SDL_LOG_PRIORITY_CRITICAL,
+@@ -734,7 +832,7 @@
+ 	}
+ 
+ 	/* Copy input ROM file to allocated memory. */
+-	if((priv.rom = SDL_LoadFile(rom_file_name, NULL)) == NULL)
++	if((priv.rom = SDL_LoadFile(rom_file_name, &priv.rom_size)) == NULL)
+ 	{
+ 		SDL_LogMessage(LOG_CATERGORY_PEANUTSDL,
+ 				SDL_LOG_PRIORITY_CRITICAL,
+@@ -917,7 +1015,18 @@
+ #endif
+ 
+ #if ENABLE_LCD
+-	gb_init_lcd(&gb, &lcd_draw_line);
++	gb_init_lcd(&gb, NULL);
++	if(!raw_background && pgb_silver_jp_init(&priv.silver, priv.rom, priv.rom_size))
++	{
++		pgb_silver_jp_configure(&priv.silver, extension_features, extension_objects);
++		priv.silver.sprites_enabled = !terrain_only;
++		pgb_silver_jp_viewport(&priv.silver, priv.width, priv.height);
++		gb_set_lcd_background(&gb, silver_background);
++		SDL_Log("Japanese Silver Rev 1: extension features=0x%x, object limit=%u (F9: offscreen sprites)",
++			priv.silver.features, priv.silver.object_limit);
++	}
++	gb_set_lcd_viewport(&gb, priv.width, priv.height, priv.viewport_row,
++		viewport_draw_line);
+ #endif
+ 
+ 	/* Allow the joystick input even if game is in background. */
+@@ -967,7 +1076,7 @@
+ 		SDL_SetWindowTitle(window, title_str);
+ 	}
+ 
+-	SDL_SetWindowMinimumSize(window, LCD_WIDTH, LCD_HEIGHT);
++	SDL_SetWindowMinimumSize(window, priv.width, priv.height);
+ 
+ 	renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC);
+ 	if(renderer == NULL)
+@@ -1003,13 +1112,13 @@
+ 	SDL_RenderPresent(renderer);
+ 
+ 	/* Use integer scale. */
+-	SDL_RenderSetLogicalSize(renderer, LCD_WIDTH, LCD_HEIGHT);
++	SDL_RenderSetLogicalSize(renderer, priv.width, priv.height);
+ 	SDL_RenderSetIntegerScale(renderer, 1);
+ 
+ 	texture = SDL_CreateTexture(renderer,
+ 				    SDL_PIXELFORMAT_RGB555,
+ 				    SDL_TEXTUREACCESS_STREAMING,
+-				    LCD_WIDTH, LCD_HEIGHT);
++				    priv.width, priv.height);
+ 
+ 	if(texture == NULL)
+ 	{
+@@ -1125,6 +1234,26 @@
+ 				{
+ 				case SDLK_RETURN:
+ 					gb.direct.joypad &= ~JOYPAD_START;
++					break;
++
++				case SDLK_F9:
++					if(priv.silver.supported)
++					{
++						priv.silver.sprites_enabled = !priv.silver.sprites_enabled;
++						SDL_Log("Offscreen sprites: %s", priv.silver.sprites_enabled ? "on" : "off");
++					}
++					break;
++
++				case SDLK_F8:
++					expanded = !expanded;
++					if(set_viewport(&gb, &priv, renderer, &texture,
++						expanded ? viewport_width : LCD_WIDTH,
++						expanded ? viewport_height : LCD_HEIGHT) != 0)
++					{
++						SDL_Log("Viewport texture: %s", SDL_GetError());
++						ret = EXIT_FAILURE;
++						goto quit;
++					}
+ 					break;
+ 
+ 				case SDLK_BACKSPACE:
+@@ -1341,10 +1470,12 @@
+ 
+ #if ENABLE_LCD
+ 		/* Copy frame buffer to SDL screen. */
+-		SDL_UpdateTexture(texture, NULL, &priv.fb, LCD_WIDTH * sizeof(uint16_t));
++		SDL_UpdateTexture(texture, NULL, priv.fb, priv.width * sizeof(uint16_t));
+ 		SDL_RenderClear(renderer);
+ 		SDL_RenderCopy(renderer, texture, NULL, NULL);
+ 		SDL_RenderPresent(renderer);
++		if(frame_limit && ++frames >= frame_limit)
++			goto quit;
+ 
+ 		if(dump_bmp)
+ 		{
+@@ -1444,6 +1575,8 @@
+ 	write_cart_ram_file(save_file_name, &priv.cart_ram, priv.save_size);
+ 
+ out:
++	free(priv.fb);
++	free(priv.viewport_row);
+ 	SDL_free(priv.rom);
+ 	SDL_free(priv.cart_ram);
+ 
+diff --git a/examples/sdl2/Makefile b/examples/sdl2/Makefile
+--- a/examples/sdl2/Makefile
++++ b/examples/sdl2/Makefile
+@@ -27,7 +27,7 @@
+ peanut-sdl: $(OBJECTS)
+ 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $^ $(LDLIBS)
+ 
+-peanut_sdl.o: peanut_sdl.c ../../peanut_gb.h
++peanut_sdl.o: peanut_sdl.c ../../peanut_gb.h ../common/pokemon_silver_jp.h ../../extensions/games/pokemon_silver_jp.h ../../extensions/include/gx_gb_view.h
+ 
+ meta/winres.o: meta/winres.rc
+ 	windres $(CPPFLAGS) $< $@
+diff --git a/examples/common/pokemon_silver_jp.h b/examples/common/pokemon_silver_jp.h
+new file mode 100644
+--- /dev/null
++++ b/examples/common/pokemon_silver_jp.h
+@@ -0,0 +1,11 @@
++/* Compatibility include. Portable implementation lives outside the emulator. */
++#ifndef PGB_SILVER_PEANUT_BINDING_H
++#define PGB_SILVER_PEANUT_BINDING_H
++#define PGB_SILVER_STATE gb_s
++#define PGB_SILVER_LAYER_TAGS PEANUT_GB_12_COLOUR
++#define PGB_SILVER_HIGH_ACCURACY PEANUT_GB_HIGH_LCD_ACCURACY
++#include "../../extensions/games/pokemon_silver_jp.h"
++#undef PGB_SILVER_STATE
++#undef PGB_SILVER_LAYER_TAGS
++#undef PGB_SILVER_HIGH_ACCURACY
++#endif
