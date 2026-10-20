@@ -1,5 +1,9 @@
 # 屏外画面扩展实验（GX）
 
+新增独立、可选的实验性 GBC 原生前端：`python3 extensions/tools/build_peanut.py --gbc`，
+固定输出 `build-extensions/bin/peanut-sdl-gbc`。来源、操作、验证与未完成项目见
+[GBC 说明](gbc/README.md)。默认 DMG/屏外构建保持原路径。
+
 这是可移植的 **presentation extension**，不是把 GB/FC 的硬件分辨率改大。
 目标是保留原始 CPU/PPU/中断时序，在前端合成额外画面；特定游戏可选运行时 ROM 读取补丁。
 

@@ -1,0 +1,33 @@
+--- a/peanut_gb.h
++++ b/peanut_gb.h
+@@ -1314,7 +1314,7 @@
+ 			ndx = (gb->cgb.BGPaletteID & 0x3E) >> 1;
+ 			gb->cgb.fixPalette[ndx] = ((fixPaletteTemp & 0x7C00) >> 10) | (fixPaletteTemp & 0x03E0) | ((fixPaletteTemp & 0x001F) << 10);  // swap Red and Blue
+ 			gb->cgb.fixPalette444[ndx] = RGB555_TO_RGB444(gb->cgb.fixPalette[ndx]);
+-			if(gb->cgb.BGPaletteInc) gb->cgb.BGPaletteID = (++gb->cgb.BGPaletteID) & 0x3F;
++			if(gb->cgb.BGPaletteInc) gb->cgb.BGPaletteID = (gb->cgb.BGPaletteID + 1) & 0x3F;
+ 			return;
+ 
+ 		/* CGB OAM Palette Index*/
+@@ -1330,7 +1330,7 @@
+ 			ndx = 0x20 + ((gb->cgb.OAMPaletteID & 0x3E) >> 1);
+ 			gb->cgb.fixPalette[ndx] = ((fixPaletteTemp & 0x7C00) >> 10) | (fixPaletteTemp & 0x03E0) | ((fixPaletteTemp & 0x001F) << 10);  // swap Red and Blue
+ 			gb->cgb.fixPalette444[ndx] = RGB555_TO_RGB444(gb->cgb.fixPalette[ndx]);
+-			if(gb->cgb.OAMPaletteInc) gb->cgb.OAMPaletteID = (++gb->cgb.OAMPaletteID) & 0x3F;
++			if(gb->cgb.OAMPaletteInc) gb->cgb.OAMPaletteID = (gb->cgb.OAMPaletteID + 1) & 0x3F;
+ 			return;
+ 
+ 		/* CGB WRAM Bank*/
+@@ -3729,9 +3729,10 @@
+ #if PEANUT_FULL_GBC_SUPPORT
+         if (inst_cycles > 1)
+             gb->counter.lcd_count += (inst_cycles >> gb->cgb.doubleSpeed);
+-        else
+-#endif
++        else { gb->counter.lcd_count += inst_cycles; }
++#else
+ 		gb->counter.lcd_count += inst_cycles;
++#endif
+ 
+ 		/* New Scanline */
+ 		if(gb->counter.lcd_count >= LCD_LINE_CYCLES)

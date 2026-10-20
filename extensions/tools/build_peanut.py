@@ -16,6 +16,7 @@ def run(args, **kwargs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--with-tests", action="store_true", help="also build the optional ROM regression executable")
+    parser.add_argument("--gbc", action="store_true", help="build the independent experimental GBC frontend")
     args = parser.parse_args()
     if sys.platform != "linux":
         raise SystemExit("Build in Linux/WSL: python3 extensions/tools/build_peanut.py")
@@ -25,6 +26,12 @@ def main():
     target = ROOT / "build-extensions"
     output = target / "bin"
     output.mkdir(parents=True, exist_ok=True)
+    if args.gbc:
+        flags = subprocess.check_output(["sdl2-config", "--cflags", "--libs"], text=True).split()
+        run(["cc", "-std=c99", "-O2", "-Wall", "-Wextra", str(ROOT / "extensions/gbc/frontend.c"), "-o", str(output / "peanut-sdl-gbc")] + flags)
+        print("GBC executable:", output / "peanut-sdl-gbc")
+        if not args.with_tests:
+            return
     archive = subprocess.check_output(["git", "archive", BASE], cwd=ROOT)
     with tempfile.TemporaryDirectory(prefix="source-", dir=target) as temporary:
         source = Path(temporary)

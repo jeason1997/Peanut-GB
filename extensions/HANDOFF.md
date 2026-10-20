@@ -1,5 +1,15 @@
 # 给下一位 AI 的接手入口
 
+## 新增可选 GBC（2026-10-20）
+
+`extensions/gbc/` 已加入固定来源的独立候选核心、SDL 原生前端和验证脚本。
+先读 [GBC README](gbc/README.md)。`build_peanut.py --gbc` 输出固定
+`build-extensions/bin/peanut-sdl-gbc`；默认 DMG 核心、补丁及原源码未替换。
+白之书实际进入室内、走到走廊、Start 打开角色状态界面；ASan/UBSan 合成硬件
+冒烟、存档文件往返通过。**没有完成声音、游戏内存档后重启 Continue、全时序认证**。
+不要把文件往返宣传成游戏 Continue 成功，也不要把此核心套用现有 DMG 银地图后端。
+用户已授权提交并推送本轮 GBC 修改；分支为 `codex/portable-viewport-extension`。
+
 先读 README.md 与 PORTING.md，再改代码。
 
 **整理后的主仓库只增加 extensions/。不要直接修改根目录核心、examples/、test/ 来接实验。**
