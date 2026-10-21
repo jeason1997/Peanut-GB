@@ -12,8 +12,97 @@ python3 extensions/tools/build_peanut.py --gbc
 
 固定二进制：`/mnt/e/Projects/Peanut-GB/build-extensions/bin/peanut-sdl-gbc`。
 默认构建及 `build-extensions/bin/peanut-sdl` 的 DMG/屏外扩展路径不变。
-GBC 前端自动按 ROM 头选择 CGB/DMG；不加载 DMG boot ROM。尚未接声音，
-尚未接 CGB 屏外画面或白之书地图后端，只有原生 160×144。
+GBC 前端自动按 ROM 头选择 CGB/DMG；不加载 DMG boot ROM。尚未接声音。
+已接入可选扩屏；白之书没有游戏地图后端，只能使用可能过期/重复的通用 VRAM 背景。
+
+## 银版彩色扩屏
+
+精确日版《银》Rev1（CRC32 `0aea5383`）可复用已有地图解码，输出真实屏外地形、
+当前地图精灵及相邻地图静态精灵预览，另接 CGB 彩色绘制；不是将 160×144 放大。
+未修改根目录核心、原 DMG 后端或 GBC 核心。原生画面居中，窗口始终按输出像素 1:1。
+
+WSL 仓库根目录执行：
+
+```sh
+python3 extensions/tools/build_peanut.py --gbc
+# 首次准备测试存档副本；后续重用，不覆盖已玩的副本。
+test -e build-extensions/silver-gbc-play.sav || cp 'Pocket Monsters Gin (Japan) (Rev 1) (SGB Enhanced) (GB Compatible).sav' build-extensions/silver-gbc-play.sav
+./build-extensions/bin/peanut-sdl-gbc --viewport 320x240 'Pocket Monsters Gin (Japan) (Rev 1) (SGB Enhanced) (GB Compatible).gbc' --save build-extensions/silver-gbc-play.sav --write-save
+```
+
+`--viewport WIDTHxHEIGHT` 支持任意符合容量的整数尺寸，默认 160×144。
+宽至少 160、高至少 144，单边最大 65535，最多 16777216 个像素；
+SDL 纹理/主机内存不足仍会报错，不保证所有 GPU 支持所有理论尺寸。
+已测 200×150、320×240、321×241、640×480，以及仅纵向/仅横向扩展。
+原生区域位于 `((WIDTH-160)/2, (HEIGHT-144)/2)`（向下取整）。
+`--terrain-only` 关闭额外精灵；`--no-background` 关闭所有屏外绘制，边缘留黑。
+菜单、对话、战斗等非地图场景的银版屏外区域自动留黑，避免显示旧地图。
+
+相邻地图切换默认开启加载追赶：保留进入切图的第一帧，再在下一次显示前运行
+短暂的原游戏加载帧，直到新地图快照完整。实测往返两次的滚动间隔从5帧恢复2帧，
+消除各约50ms的额外等待。每次最多额外6个模拟帧，总处理达到8ms便停止追赶。
+CPU/PPU仍执行完整流程；门、传送、菜单不走此路径。RTC按显示帧对应时间计时。
+`--no-transition-catchup` 可关闭以作对照；`--frames`/输入脚本按显示帧计数，额外
+加载帧不递增此计数，退出时单独报告 `extra_emulated_frames`。
+
+银版 GBC 现接入与 GB 版相同的 ROM-read NPC 激活/保留范围扩充，当前地图屏外
+NPC由游戏本身运行。读取回调只覆盖精确JP Rev1的已有常量，不改磁盘ROM或核心。
+未激活/邻图对象只允许静止类型（movement 1、6..9）预览；走动、转向和脚本类型
+等到有真实live槽后才显示，避免猜测位置被真实位置替换。邻图不额外运行AI。
+受游戏13个live槽（含玩家）和共享后端最大31格扩围限制，任意输出尺寸不代表
+无限NPC模拟范围。`--no-background` 和原生160×144不启用范围扩充；
+`--terrain-only`只关闭额外精灵绘制，仍保留当前地图NPC运行范围扩充。
+中央原生区只补齐未送入OAM、且身体跨越画面边界的精灵部分，避免两种绘制来源
+交接时缺一块；已发布的OAM姿势不重画，核心玩家/精灵像素优先保留。
+跨图可见的屋顶色仍按其所属地图校正。其他原生像素保持核心输出，原 DMG 可执行文件不变。
+
+真实 ROM + 存档副本回归：
+
+```sh
+python3 extensions/gbc/verify_silver_viewport.py 'Pocket Monsters Gin (Japan) (Rev 1) (SGB Enhanced) (GB Compatible).gbc' 'Pocket Monsters Gin (Japan) (Rev 1) (SGB Enhanced) (GB Compatible).sav'
+```
+
+测试只读取输入，并在 `build-extensions/gbc-silver-viewport/` 运行副本。
+含 ASan/UBSan、奇数尺寸/显存银行/翻转/颜色测试，以及银版 8000 帧纯展示双实例对照
+（此对照特意使用原ROM读取回调，单独隔离绘制影响）：
+逐帧 CPU、WRAM、VRAM、OAM、GBC 状态与存档 RAM 相同，中央每行检查像素；
+只有已识别的跨图屋顶颜色和未发布跨界精灵允许显示修正。另测昼夜、跨地图来回切换、渐暗
+和精灵颜色排除，确保旧屋顶不随当前地图的调色板变化。
+真实实走回归还生成 `roof-before.ppm` / `roof-after.ppm` / `roof-return.ppm`；
+校验包含返回时地图编号先切换、硬件屋顶色延迟上传的过渡帧。实走脚本要求 Continue 后
+group26/map3、x10/y9 的位置，其他存档明确SKIP，不计作实走通过。
+
+精灵衔接新增 `test_sprite_seams.c`（四个边界、玩家/原生OBJ保护、已发布姿势排除）
+和 `test_silver_sprite_seams.c`（吉花市实际移动路线，比较完整NPC绘制与边界合成结果）。
+后者同样要求上述位置的测试存档；使用未推进RTC的确定性输入以复现同一NPC步态。
+另检查真实扫描线期间的对象槽复用：精灵颜色与姿势在帧开始一起捕获，旧地图
+对象按所属地图和对象编号保留颜色，防止逐行重读新槽造成半身换色或消失。
+激活范围扩充后的实际往返另检查屏外live对象持续移动及进入OAM时的位置连续性；
+不再将修改NPC运行范围后的游戏状态或截图宣称与原生模式一致。
+当前路线通过58884个边界像素样本、3210个屏外live对象样本（14个移动样本）和23次
+OAM交接，未见超过正常步幅的位置跳变；屋顶9381576个像素检查也通过，包含6163个
+返回时硬件颜色滞后的样本。完整ASan/UBSan验证通过，原ROM与存档哈希未改。
+截图 `320x240.ppm`、`walk.ppm`、`menu.ppm` 供人工检查。
+
+测试源码是保留的回归保护，移植运行时无需复制：
+
+|测试|覆盖内容|
+|---|---|
+|`test_core.c`|银行、DMA、调色板、双速与reset冒烟|
+|`test_viewport.c`|尺寸、翻转、银行、原生区与缓冲边界|
+|`test_sprite_seams.c`|四边补画、原生OBJ保护、颜色快照、预览筛选|
+|`test_silver_roofs.c`、`test_silver_roof_route.c`|合成昼夜/渐暗与实际屋顶往返|
+|`test_silver_viewport.c`|8000帧纯展示双实例对照|
+|`test_silver_sprite_seams.c`|实际NPC范围、运动、OAM交接与颜色槽复用|
+|`test_transition_catchup.c`|切图节奏、完整状态/输出对照、时间预算与菜单排除|
+
+一次性调试探针、逐帧日志和重复试验二进制已清理。回归生成文件集中在忽略的
+`build-extensions/gbc-silver-viewport/` 与 `gbc-verification/`；ROM和存档不纳入Git。
+
+本轮实测：8000帧得到7289个有效彩色扩展帧，逐行核对1151424条原生行，
+累计绘制870986个边缘OBJ像素，ASan/UBSan未报错（纯展示对照）。多尺寸、行走、
+菜单另作运行检查；关闭背景扩充时仍与160×144参考截图对照。切图耗时与追赶策略的
+测量方法见PORTING，主机结果不能外推MCU性能。
 
 按键：方向键、Z=A、X=B、Enter=Start、Backspace=Select、Esc=退出。
 默认**不写存档**。读取测试副本用 `--save /path/copy.sav`；明确指定

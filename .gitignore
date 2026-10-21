@@ -14,6 +14,8 @@ bin*/
 *.gch
 *.gcda
 *.gcno
+__pycache__/
+*.py[cod]
 # Run items
 *.sav
 *.bmp

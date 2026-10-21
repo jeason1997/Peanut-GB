@@ -3,6 +3,9 @@
 新增独立、可选的实验性 GBC 原生前端：`python3 extensions/tools/build_peanut.py --gbc`，
 固定输出 `build-extensions/bin/peanut-sdl-gbc`。来源、操作、验证与未完成项目见
 [GBC 说明](gbc/README.md)。默认 DMG/屏外构建保持原路径。
+GBC 版已支持 `--viewport 320x240` 等任意合法尺寸，精确日版银Rev1支持彩色地形及
+屏外精灵及当前地图NPC运行范围扩充；移动NPC使用真实live状态，尚未激活的移动
+NPC不再作位置猜测预览。使用方法与验证见上述 GBC 说明。
 
 这是可移植的 **presentation extension**，不是把 GB/FC 的硬件分辨率改大。
 目标是保留原始 CPU/PPU/中断时序，在前端合成额外画面；特定游戏可选运行时 ROM 读取补丁。

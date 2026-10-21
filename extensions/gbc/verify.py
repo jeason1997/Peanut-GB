@@ -21,6 +21,10 @@ def main():
     flags = subprocess.check_output(["sdl2-config", "--cflags", "--libs"], text=True).split()
     run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_core.c", "-o", OUT / "test-core", *flags])
     run([OUT / "test-core"])
+    run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_viewport.c", "-o", OUT / "test-viewport", *flags])
+    run([OUT / "test-viewport"])
+    run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_sprite_seams.c", "-o", OUT / "test-sprite-seams", *flags])
+    run([OUT / "test-sprite-seams"])
     # Run the repository's instruction/timing/DMG LCD fixtures against this
     # optional core too, without editing their original sources.
     upstream = OUT / "upstream"
