@@ -23,6 +23,8 @@ def main():
     run([OUT / "test-core"])
     run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_viewport.c", "-o", OUT / "test-viewport", *flags])
     run([OUT / "test-viewport"])
+    run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_render_cache.c", "-o", OUT / "test-render-cache", *flags])
+    run([OUT / "test-render-cache"])
     run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_sprite_seams.c", "-o", OUT / "test-sprite-seams", *flags])
     run([OUT / "test-sprite-seams"])
     # Run the repository's instruction/timing/DMG LCD fixtures against this

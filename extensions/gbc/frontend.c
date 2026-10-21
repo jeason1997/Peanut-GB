@@ -19,6 +19,20 @@ static uint32_t *output;
 static uint8_t *viewport_row;
 static unsigned output_width=160,output_height=144;
 static unsigned errors;
+static int profile_enabled;
+static uint64_t profile_draw_ticks;
+struct frame_profile {unsigned long frames,over_budget;double run_ms,draw_ms,present_ms,max_ms;};
+static void profile_record(struct frame_profile *p,double run,double draw_time,double present)
+{
+    p->frames++;p->run_ms+=run;p->draw_ms+=draw_time;p->present_ms+=present;
+    if(run+present>p->max_ms)p->max_ms=run+present;
+    if(run+present>70224.0/4194304.0*1000)p->over_budget++;
+}
+static void profile_report(const char *name,const struct frame_profile *p)
+{
+    if(p->frames)printf("profile=%s samples=%lu run_avg_ms=%.3f draw_avg_ms=%.3f present_avg_ms=%.3f work_max_ms=%.3f over_budget=%lu\n",
+        name,p->frames,p->run_ms/p->frames,p->draw_ms/p->frames,p->present_ms/p->frames,p->max_ms,p->over_budget);
+}
 static double monotonic_ms(void) {
     return SDL_GetPerformanceCounter()*1000.0/SDL_GetPerformanceFrequency();
 }
@@ -47,6 +61,7 @@ static void core_error(struct gb_s *g, enum gb_error_e e, uint16_t a) {
 }
 static void draw(struct gb_s *g, const uint8_t *p, uint_fast8_t y) {
     if (y >= 144) return;
+    uint64_t started=profile_enabled?SDL_GetPerformanceCounter():0;
     for (unsigned x=0; x<160; x++) {
         unsigned r,b,v;
         if (g->cgb.cgbMode) {
@@ -56,6 +71,7 @@ static void draw(struct gb_s *g, const uint8_t *p, uint_fast8_t y) {
         pixels[y][x]=0xff000000u|(r<<16)|(v<<8)|b;
     }
     if(viewport.output)gbc_view_line(&viewport,p,y);
+    if(profile_enabled)profile_draw_ticks+=SDL_GetPerformanceCounter()-started;
 }
 static void snapshot(const char *path) {
     FILE *f=fopen(path,"wb"); if (!f) { perror(path); exit(1); }
@@ -69,7 +85,8 @@ static void snapshot(const char *path) {
 int main(int argc,char **argv) {
     const char *rom_path=NULL,*save=NULL,*shot=NULL,*script=NULL;
     unsigned long frames=0;
-    int hidden=0,fast=0,write_save=0,background=1,sprites=1,catchup=1;
+    int hidden=0,fast=0,write_save=0,background=1,sprites=1,catchup=1,present_hidden=0;
+    const char *renderer_mode="auto";
     for(int i=1;i<argc;i++) {
         if(!strcmp(argv[i],"--hidden")) hidden=1;
         else if(!strcmp(argv[i],"--fast")) fast=1;
@@ -77,6 +94,14 @@ int main(int argc,char **argv) {
         else if(!strcmp(argv[i],"--no-background")) background=0;
         else if(!strcmp(argv[i],"--terrain-only")) sprites=0;
         else if(!strcmp(argv[i],"--no-transition-catchup")) catchup=0;
+        else if(!strcmp(argv[i],"--profile")) profile_enabled=1;
+        else if(!strcmp(argv[i],"--present-hidden")) present_hidden=1;
+        else if(i+1<argc&&!strcmp(argv[i],"--renderer")) {
+            renderer_mode=argv[++i];
+            if(strcmp(renderer_mode,"auto")&&strcmp(renderer_mode,"software")&&strcmp(renderer_mode,"accelerated")) {
+                fprintf(stderr,"Renderer must be auto, software or accelerated\n");return 1;
+            }
+        }
         else if(i+1<argc&&!strcmp(argv[i],"--viewport")) {
             unsigned w,h;
             if(!parse_viewport(argv[++i],&w,&h)) {
@@ -92,7 +117,7 @@ int main(int argc,char **argv) {
         else { fprintf(stderr,"Unknown/incomplete argument: %s\n",argv[i]); return 1; }
     }
     if(!rom_path || (write_save&&!save) || (hidden&&!frames)) {
-        fprintf(stderr,"Usage: %s ROM [--viewport WxH] [--no-background] [--terrain-only] [--no-transition-catchup] [--save COPY] [--write-save] [--hidden --frames N] [--fast] [--input SCRIPT] [--snapshot PPM]\n",argv[0]); return 1;
+        fprintf(stderr,"Usage: %s ROM [--viewport WxH] [--no-background] [--terrain-only] [--no-transition-catchup] [--renderer auto|software|accelerated] [--profile] [--save COPY] [--write-save] [--hidden --frames N] [--present-hidden] [--fast] [--input SCRIPT] [--snapshot PPM]\n",argv[0]); return 1;
     }
     if(save&&!strcmp(save,rom_path)) return 1;
     FILE *f=fopen(rom_path,"rb"); if(!f) {perror(rom_path);return 1;}
@@ -119,11 +144,29 @@ int main(int argc,char **argv) {
     unsigned long next=0; unsigned mask=0; int has=input&&fscanf(input,"%lu %x",&next,&mask)==2;
     if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_TIMER)) {fprintf(stderr,"%s\n",SDL_GetError());return 1;}
     SDL_Window *window=SDL_CreateWindow("Peanut GBC (experimental, silent)",SDL_WINDOWPOS_UNDEFINED,SDL_WINDOWPOS_UNDEFINED,output_width,output_height,hidden?SDL_WINDOW_HIDDEN:0);
-    SDL_Renderer *renderer=window?SDL_CreateRenderer(window,-1,SDL_RENDERER_SOFTWARE):NULL;
+    SDL_Renderer *renderer=NULL;
+    if(window&&strcmp(renderer_mode,"software"))renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_ACCELERATED);
+    /* An OpenGL renderer may itself be Mesa's CPU rasterizer in WSL. Avoid
+     * mistaking that for a GPU path; it adds another software rendering layer. */
+    if(renderer&&SDL_GL_GetCurrentContext()) {
+        typedef const unsigned char *(*get_string_fn)(unsigned);
+        get_string_fn get_string=(get_string_fn)SDL_GL_GetProcAddress("glGetString");
+        const char *device=get_string?(const char*)get_string(0x1f01):NULL; /* GL_RENDERER */
+        if(device)printf("renderer_device=%s\n",device);
+        if(!strcmp(renderer_mode,"auto")&&device&&
+            (strstr(device,"llvmpipe")||strstr(device,"softpipe")||strstr(device,"Software Rasterizer"))) {
+            SDL_DestroyRenderer(renderer);renderer=NULL;
+        }
+    }
+    if(window&&!renderer&&strcmp(renderer_mode,"accelerated"))renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_SOFTWARE);
     SDL_Texture *texture=renderer?SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,output_width,output_height):NULL;
     if(!texture){fprintf(stderr,"%s\n",SDL_GetError());return 1;}
+    SDL_RendererInfo renderer_info;
+    if(!SDL_GetRendererInfo(renderer,&renderer_info))printf("renderer=%s accelerated=%u hidden=%d\n",renderer_info.name,!!(renderer_info.flags&SDL_RENDERER_ACCELERATED),hidden);
     uint64_t start=SDL_GetPerformanceCounter(); unsigned long count=0; int quit=0; uint8_t scripted=255;
     struct gbc_frame_runner runner={0};
+    struct frame_profile all_profile={0},map_profile={0};
+    double tick_ms=1000.0/SDL_GetPerformanceFrequency();
     while(!quit&&(!frames||count<frames)) {
         SDL_Event event; while(SDL_PollEvent(&event)) if(event.type==SDL_QUIT)quit=1;
         const uint8_t *k=SDL_GetKeyboardState(NULL);
@@ -131,17 +174,26 @@ int main(int argc,char **argv) {
         while(has&&next<=count){scripted=(uint8_t)~mask;has=fscanf(input,"%lu %x",&next,&mask)==2;}
         unsigned keys=(k[SDL_SCANCODE_Z]?1:0)|(k[SDL_SCANCODE_X]?2:0)|(k[SDL_SCANCODE_BACKSPACE]?4:0)|(k[SDL_SCANCODE_RETURN]?8:0)|(k[SDL_SCANCODE_RIGHT]?16:0)|(k[SDL_SCANCODE_LEFT]?32:0)|(k[SDL_SCANCODE_UP]?64:0)|(k[SDL_SCANCODE_DOWN]?128:0);
         g->direct.joypad=scripted & (uint8_t)~keys;
+        uint64_t frame_started=profile_enabled?SDL_GetPerformanceCounter():0;profile_draw_ticks=0;
         gbc_run_display_frame(&runner,&viewport,g,catchup,monotonic_ms); count++;
         /* RTC follows display-frame time; loading catch-up and CPU double
          * speed must not accelerate it. */
         if((uint64_t)count*70224/4194304 != (uint64_t)(count-1)*70224/4194304)gb_tick_rtc(g);
-        if(!hidden){SDL_UpdateTexture(texture,NULL,output,output_width*4);SDL_RenderCopy(renderer,texture,NULL,NULL);SDL_RenderPresent(renderer);}
+        uint64_t run_finished=profile_enabled?SDL_GetPerformanceCounter():0;
+        if(!hidden||present_hidden){SDL_UpdateTexture(texture,NULL,output,output_width*4);SDL_RenderCopy(renderer,texture,NULL,NULL);SDL_RenderPresent(renderer);}
+        if(profile_enabled) {
+            double run=(run_finished-frame_started)*tick_ms,draw_time=profile_draw_ticks*tick_ms;
+            double present=(SDL_GetPerformanceCounter()-run_finished)*tick_ms;
+            profile_record(&all_profile,run,draw_time,present);
+            if(viewport.silver.frame_valid)profile_record(&map_profile,run,draw_time,present);
+        }
         if(!fast){double due=count*(70224.0/4194304.0)*1000;double elapsed=(SDL_GetPerformanceCounter()-start)*1000.0/SDL_GetPerformanceFrequency();if(due>elapsed)SDL_Delay((uint32_t)(due-elapsed));}
     }
     double elapsed=(SDL_GetPerformanceCounter()-start)/(double)SDL_GetPerformanceFrequency();
     struct rusage usage; getrusage(RUSAGE_SELF,&usage);
     printf("frames=%lu wall=%.3fs cpu=%.3fs fps=%.1f context=%zu rom=%zu save=%zu framebuffer=%zu maxrss=%ldKiB cgb=%u double=%u PC=%04x errors=%u\n",count,elapsed,usage.ru_utime.tv_sec+usage.ru_utime.tv_usec/1e6+usage.ru_stime.tv_sec+usage.ru_stime.tv_usec/1e6,count/elapsed,sizeof(*g),rom_size,ram_size,sizeof(pixels),usage.ru_maxrss,g->cgb.cgbMode,g->cgb.doubleSpeed,g->cpu_reg.pc.reg,errors);
     if(shot)snapshot(shot);
+    if(profile_enabled){profile_report("all",&all_profile);profile_report("map",&map_profile);}
     printf("connection_catchup=%d completed=%lu extra_emulated_frames=%lu\n",catchup,runner.connections,runner.extra_frames);
     printf("extension map_frames=%lu colour_valid_frames=%lu palette_mismatches=%u rows=%lu margin_sprite_pixels=%lu native_seam_pixels=%lu output_bytes=%zu row_bytes=%u adapter_bytes=%zu\n",viewport.map_frames,viewport.valid_frames,viewport.palette_mismatches,viewport.emitted_rows,viewport.margin_sprite_pixels,viewport.native_seam_pixels,(size_t)output_width*output_height*sizeof(*output),output_width,sizeof(viewport));
     if(write_save){f=fopen(save,"wb");if(!f||fwrite(ram,1,ram_size,f)!=ram_size||fclose(f))return 1;}

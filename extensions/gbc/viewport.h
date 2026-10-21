@@ -20,12 +20,40 @@ struct gbc_viewport {
     int roof_cache_x,roof_cache_y,roof_cache_valid;
     unsigned roof_cache_group;
     uint8_t roof_night,roof_time_ready;
+    /* Direct-mapped strip cache. A 32px map block supplies sixteen tiles;
+     * retaining it across scanlines avoids repeating the atlas search. */
+    struct {int x,y;uint8_t valid,block,owner;} terrain_cache[128];
+    uint32_t colours[256];
+    uint16_t colour_source[64];
+    int colours_ready,colour_mode;
+    struct gx_cgb_row_decoder tile_decoder;
     int8_t object_palettes[PGB_SILVER_MAX_OBJECTS];
     struct { uint8_t group,number,index,palette; } palette_history[PGB_SILVER_MAX_OBJECTS];
     unsigned palette_history_next;
     int object_palettes_ready;
     int silver_enabled, background_enabled;
 };
+static void gbc_silver_reset_terrain(struct gbc_viewport *v)
+{
+    memset(v->terrain_cache,0,sizeof(v->terrain_cache));
+}
+static unsigned gbc_silver_cached_cell(struct gbc_viewport *v,int x,int y)
+{
+    int bx=pgb_silver_floor32(x),by=pgb_silver_floor32(y);
+    unsigned slot=(unsigned)bx&127;
+    if(!v->terrain_cache[slot].valid||v->terrain_cache[slot].x!=bx||v->terrain_cache[slot].y!=by) {
+        v->terrain_cache[slot].x=bx;v->terrain_cache[slot].y=by;
+        v->terrain_cache[slot].block=pgb_silver_world_block(&v->silver,&v->view,&v->silver.frame_map,x,y);
+        v->terrain_cache[slot].owner=255;v->terrain_cache[slot].valid=1;
+    }
+    return slot;
+}
+static uint8_t gbc_silver_cached_tile(struct gbc_viewport *v,int x,int y)
+{
+    unsigned slot=gbc_silver_cached_cell(v,x,y);
+    return v->silver.rom[v->silver.frame_map.definitions+(v->terrain_cache[slot].block&127)*16+
+        (((unsigned)y&31)>>3)*4+(((unsigned)x&31)>>3)];
+}
 #include "silver_sprites.h"
 /* Use the same exact-ROM NPC lifetime policy as the DMG frontend. Rendering
  * alone cannot predict the random walks of objects that the game deletes. */
@@ -52,6 +80,7 @@ static void gbc_view_begin(void *user)
 {
     struct gbc_viewport *v=user;struct gb_s *g=v->gb;
     v->roof_cache_valid=0;
+    gbc_silver_reset_terrain(v);
     v->object_palettes_ready=0;
     v->roof_time_ready=0;
     gx_peanut_view(&v->view,g);
@@ -94,11 +123,13 @@ static void gbc_view_background(void *user,uint8_t *out,uint16_t n,int32_t x,int
         if(!v->silver.frame_valid)return;
         if(!g->cgb.cgbMode){pgb_silver_jp_background(&v->silver,&v->view,out,n,x,y);return;}
         const struct pgb_silver_map *m=&v->silver.frame_map;
-        uint8_t tile=0;
-        for(unsigned i=0;i<n;i++) {
+        for(unsigned i=0;i<n;) {
             int wx=m->origin_x+x+(int)i,wy=m->origin_y+y;
-            if(!i || !(wx&7))tile=pgb_silver_world_tile(&v->silver,&v->view,m,wx,wy);
-            out[i]=gx_cgb_tile_pixel(g->vram,g->hram_io[0x40],tile,v->tile_attr[tile],(unsigned)wx&7,(unsigned)wy&7);
+            uint8_t tile=gbc_silver_cached_tile(v,wx,wy);
+            unsigned first=(unsigned)wx&7,count=8-first;if(count>n-i)count=n-i;
+            gx_cgb_tile_span(&v->tile_decoder,g->vram,g->hram_io[0x40],tile,v->tile_attr[tile],
+                (unsigned)wy&7,first,count,out+i);
+            i+=count;
         }
         gbc_silver_sprites(v,out,n,x,y);
     } else if(g->cgb.cgbMode)gx_cgb_background(g->vram,g->hram_io,out,n,x,y);
@@ -107,8 +138,15 @@ static void gbc_view_background(void *user,uint8_t *out,uint16_t n,int32_t x,int
 static void gbc_view_emit(void *user,const uint8_t *p,uint16_t n,uint16_t y)
 {
     struct gbc_viewport *v=user;
+    int mode=!!v->gb->cgb.cgbMode;
+    if(!v->colours_ready||v->colour_mode!=mode||
+        (mode&&memcmp(v->colour_source,v->gb->cgb.fixPalette,sizeof(v->colour_source)))) {
+        memcpy(v->colour_source,v->gb->cgb.fixPalette,sizeof(v->colour_source));
+        for(unsigned i=0;i<256;i++)v->colours[i]=gbc_rgb(v->gb,(uint8_t)i);
+        v->colour_mode=mode;v->colours_ready=1;
+    }
     for(unsigned x=0;x<n;x++) {
-        v->output[(size_t)y*v->compose.width+x]=gbc_view_colour(v,p[x],x,y);
+        v->output[(size_t)y*v->compose.width+x]=(p[x]==25||p[x]==26)?gbc_view_colour(v,p[x],x,y):v->colours[p[x]];
         if(v->gb->cgb.cgbMode&&p[x]>=32&&p[x]<64&&
             (x<v->compose.left||x>=(unsigned)v->compose.left+160||y<v->compose.top||y>=(unsigned)v->compose.top+144))v->margin_sprite_pixels++;
     }
@@ -131,6 +169,7 @@ static int gbc_view_init(struct gbc_viewport *v,struct gb_s *g,const uint8_t *ro
     (void)pgb_silver_jp_rom_read;(void)pgb_silver_jp_foreground;(void)pgb_silver_jp_margins;
     memset(v,0,sizeof(*v));v->gb=g;v->output=output;v->row=row;v->background_enabled=background;
     gx_peanut_view(&v->view,g);
+    gx_cgb_row_decoder_init(&v->tile_decoder);
     v->silver_enabled=pgb_silver_jp_init(&v->silver,rom,bytes);
     pgb_silver_jp_configure(&v->silver,PGB_SILVER_ALL,PGB_SILVER_MAX_OBJECTS);
     pgb_silver_jp_viewport(&v->silver,w,h);

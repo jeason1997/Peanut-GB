@@ -34,7 +34,7 @@ def main():
     shutil.copyfile(original, rom); shutil.copyfile(original_save, save)
     run([sys.executable, "extensions/tools/build_peanut.py", "--gbc"])
     flags = subprocess.check_output(["sdl2-config", "--cflags", "--libs"], text=True).split()
-    for name in ["viewport", "sprite_seams", "silver_roofs", "silver_viewport"]:
+    for name in ["viewport", "render_cache", "sprite_seams", "silver_roofs", "silver_viewport"]:
         run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", f"extensions/gbc/test_{name}.c", "-o", OUT / name, *flags])
         run([OUT / name, *([rom, save] if name == "silver_viewport" else [rom] if name == "silver_roofs" else [])])
     run(["cc", "-std=c99", "-O1", "-g", "-fsanitize=address,undefined", "extensions/gbc/test_silver_roof_route.c", "-o", OUT / "roof-route", *flags])
@@ -59,7 +59,7 @@ def main():
         run([binary, rom, "--save", save, "--viewport", size, "--input", input_path, "--hidden", "--fast", "--frames", frames, "--snapshot", shot, *extra], env=env)
         return shot
     reference = center(emulate("160x144"))
-    for size in ["200x150", "320x240", "321x241", "640x480", "160x240", "320x144"]:
+    for size in ["200x150", "320x240", "321x241", "640x480", "1920x1080", "160x240", "320x144"]:
         shot = emulate(size)
         w, h, b = ppm(shot)
         # Expanded NPC activation intentionally changes game state/RNG, so

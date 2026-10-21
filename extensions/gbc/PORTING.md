@@ -34,6 +34,7 @@ GBC 分支已经包含：CGB 模式检测、WRAM/VRAM 银行、彩色 BG/OBJ 调
 |`extensions/gbc/frontend.c`|WSL/SDL 的 ROM、RAM、输入、彩色行输出、限速、截图、存档接线|参考接线，板端重写|
 |`extensions/gbc/viewport.h`|GBC/DMG → 通用合成器接线、银版 CGB 地形颜色和场景校验|需要扩屏时使用|
 |`extensions/gbc/background.h`|通用 CGB 双银行/属性/翻转的 BG 像素读取|需要通用 CGB VRAM 背景时使用|
+|`extensions/gbc/test_render_cache.c`|快速行解码与缓存的标量参考对照、逐行颜色更新|仅测试|
 |`extensions/gbc/silver_sprites.h`|精确银版的彩色屏外精灵、OBJ 调色板与 CGB 优先级|需要银版彩色精灵时使用|
 |`extensions/gbc/silver_roofs.h`|屋顶按空间所属地图选择配色，防止跨图改色|银版彩色扩屏需要|
 |`extensions/gbc/frame_runner.h`|相邻地图加载帧追赶，缩短滚动停顿|需缩短切图停顿时接入|
@@ -300,6 +301,40 @@ warp/门/菜单和不支持的ROM、原生尺寸、关闭背景扩充不触发�
 320×240输出。两次切图额外运行共6帧，镜头更新间隔从5个原帧变为2个显示帧。
 另验证菜单不能继承追赶标志。优化构建含时钟预算的实际测量，切图窗口最高约
 4.77ms，低于16.743ms帧预算；这不含SDL呈现与宿主调度。
+
+### 1080P绘制优化（2026-10-21）
+
+优化只改GBC展示模块和SDL接线，不改模拟核心、共享DMG后端、NPC策略或ROM。
+gprof定位到旧实现900显示帧内约127460025次 `pgb_silver_world_block`，即每8个像素
+重复遍历地图图谱，每条扫描线再次查询；另有大量重复RGB换算和逐像素图块寻址。
+gprof插桩的墙钟时间不能当作性能基准，下面比较使用无插桩优化构建。
+
+- `viewport.h` 的128条直接映射缓存以32×32世界块坐标为键，保留block和屋顶owner。
+  每次 `gbc_view_begin` 清空；碰撞同时校验X/Y，负坐标按共享floor32定义。block使用
+  `frame_blocks`快照，保留原地图编辑与最近地图边界规则；一次查出的block供16个tile
+  及后续扫描线复用。超过缓存宽度只增加缺失，不改变结果。
+- `background.h` 的 `gx_cgb_row_decoder` 共享bitplane展开表，一次生成8个
+  byte索引，支持VRAM bank、signed tile、XY翻转、palette和边缘裁剪；`memcpy` 保持
+  字节序可移植。VRAM每次仍实时读取，不持有跨行或跨帧图像，避免槽位换图闪烁。
+- `gbc_view_emit` 缓存256个ARGB索引结果，每条输出行比较64个CGB RGB555源色。
+  BG/OBJ颜色变化在下一行立即可见，切换CGB/DMG也重建。屋顶25/26仍走空间归属
+  校正，owner与terrain共享块缓存；没有绕过此前的旧地图/昼夜/渐暗保护。
+- SDL前端默认auto尝试加速后端；GL设备是llvmpipe/softpipe/Software Rasterizer
+  时回退软件，避免叠加CPU光栅器。显式renderer选项可覆盖此策略。驱动被标为
+  accelerated不能证明物理GPU已启用，需同时查看启动设备日志。
+
+当前ABI中固定adapter从13008变为18008字节：地图块缓存1536、颜色缓存/控制1160、
+图块行展开表2304，合计增加5000字节，不额外申请整屏缓存。移植可裁剪容量；
+必须保留每帧失效和逐行调色板检查，不能只在地图切换时清空。
+
+同一900帧Continue输入、1920×1080、无SDL呈现，旧提交4a19572约14.462秒，
+新实现约2.786秒，整幅最终PPM逐字节一致。1200帧含隐藏SDL呈现且正常限速，
+20.091秒/59.7FPS，地图模拟与绘制均值3.889ms，呈现1.690ms，工作峰值6.907ms，
+地图无超预算帧。这不含桌面合成器最终呈现延迟，也不保证其他地图或MCU帧率。
+
+新增 `test_render_cache.c` 524288组bitplane行对照标量实现，覆盖bank/signed/XY、
+裁剪边界、负坐标、直接映射碰撞、下一帧地图修改、BG/OBJ逐行调色板变化及DMG
+切换；全套回归另增加1920×1080尺寸。原屋顶/NPC/切图与8000帧状态对照仍保留。
 
 ### 扩屏缓冲预算
 

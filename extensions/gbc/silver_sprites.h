@@ -32,7 +32,7 @@ static void gbc_silver_remove_predictions(struct gbc_viewport *v)
 static uint8_t gbc_silver_terrain(struct gbc_viewport *v,int x,int y)
 {
     int wx=v->silver.frame_map.origin_x+x,wy=v->silver.frame_map.origin_y+y;
-    uint8_t tile=pgb_silver_world_tile(&v->silver,&v->view,&v->silver.frame_map,wx,wy);
+    uint8_t tile=gbc_silver_cached_tile(v,wx,wy);
     return gx_cgb_tile_pixel(v->gb->vram,v->gb->hram_io[0x40],tile,v->tile_attr[tile],(unsigned)wx&7,(unsigned)wy&7);
 }
 static int gbc_silver_object_palette(struct gbc_viewport *v,const struct pgb_silver_object *o)

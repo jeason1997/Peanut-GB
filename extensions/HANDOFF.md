@@ -2,6 +2,15 @@
 
 ## 可选 GBC 彩色扩屏（2026-10-21 整理）
 
+后续1080P性能优化：`viewport.h` 加128条32×32地图块缓存（每帧清空）和逐行检查的
+ARGB查表；`background.h` 一次解码8像素bitplane行，实时读VRAM，不能把图像跨帧
+缓存。adapter增加5000字节至18008。SDL默认auto，识别llvmpipe等CPU GL光栅器
+则回退software；新增 `--renderer`、`--profile`、`--present-hidden` 诊断选项。
+同一900帧1080P纯绘制从14.46秒降至2.79秒，最终PPM逐字节一致；1200帧含隐藏SDL
+呈现、正常限速为20.091秒/59.7FPS，地图工作均值约5.58ms，无超预算帧。隐藏呈现
+不含桌面合成器最终延迟。新增 `test_render_cache.c` 的标量对照，完整回归已含1080P。
+本轮性能优化随本次提交交付；下列运行策略与功能边界继续有效。
+
 运行入口见 [GBC README](gbc/README.md)，实现来源、地址证据与移植接线见
 [PORTING](gbc/PORTING.md)。分支 `codex/portable-viewport-extension`，推送远端 `fork`。
 用户已授权本轮清理、更新文档、提交及推送。

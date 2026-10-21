@@ -33,7 +33,7 @@ test -e build-extensions/silver-gbc-play.sav || cp 'Pocket Monsters Gin (Japan) 
 `--viewport WIDTHxHEIGHT` 支持任意符合容量的整数尺寸，默认 160×144。
 宽至少 160、高至少 144，单边最大 65535，最多 16777216 个像素；
 SDL 纹理/主机内存不足仍会报错，不保证所有 GPU 支持所有理论尺寸。
-已测 200×150、320×240、321×241、640×480，以及仅纵向/仅横向扩展。
+已测 200×150、320×240、321×241、640×480、1920×1080，以及仅纵向/仅横向扩展。
 原生区域位于 `((WIDTH-160)/2, (HEIGHT-144)/2)`（向下取整）。
 `--terrain-only` 关闭额外精灵；`--no-background` 关闭所有屏外绘制，边缘留黑。
 菜单、对话、战斗等非地图场景的银版屏外区域自动留黑，避免显示旧地图。
@@ -55,6 +55,35 @@ NPC由游戏本身运行。读取回调只覆盖精确JP Rev1的已有常量，�
 中央原生区只补齐未送入OAM、且身体跨越画面边界的精灵部分，避免两种绘制来源
 交接时缺一块；已发布的OAM姿势不重画，核心玩家/精灵像素优先保留。
 跨图可见的屋顶色仍按其所属地图校正。其他原生像素保持核心输出，原 DMG 可执行文件不变。
+
+## 1080P 性能与诊断
+
+扩屏仍按真实输出像素绘制。32×32地图块查询按帧缓存，8个像素的图块行一次解码，
+ARGB颜色查表按每条输出行检查调色板变化；不缓存跨帧NPC位置或VRAM像素。
+当前桌面adapter为18008字节，比优化前增加5000字节固定缓存，输出缓冲预算不变。
+
+`--renderer auto` 是默认值：优先可用的加速渲染，识别OpenGL的llvmpipe/softpipe
+等CPU光栅器时退回SDL软件路径；`--renderer software` 或 `accelerated` 可明确选择。
+启动日志会打印实际后端和可查询的GL设备。SDL标记accelerated不保证WSL实际用GPU。
+
+原运行命令无需更改。加 `--profile` 可在退出时查看模拟与绘制、SDL呈现耗时：
+
+```sh
+./build-extensions/bin/peanut-sdl-gbc --viewport 1920x1080 'Pocket Monsters Gin (Japan) (Rev 1) (SGB Enhanced) (GB Compatible).gbc' --save build-extensions/silver-gbc-play.sav --write-save --profile
+```
+
+`run_avg_ms` 包含 `draw_avg_ms`，两者不能相加；再加 `present_avg_ms` 是每帧工作时间，
+不包括限速睡眠。`profile=map` 单独统计地图场景，避免开场/菜单稀释结果。
+`--hidden` 默认跳过呈现；诊断时加 `--present-hidden` 执行隐藏窗口的纹理上传和SDL呈现，
+仍不等同于可见窗口/桌面合成器耗时。`--fast` 才取消59.7FPS限速。
+
+2026-10-21同机WSL、精确银版/相同Continue输入、900显示帧（495地图帧）无插桩比较：
+优化前纯模拟/绘制约14.46秒，优化后约2.79秒，最终整幅1080P截图逐字节相同。
+开启实时限速和隐藏SDL呈现的1200帧测试为20.091秒、59.7FPS；地图平均模拟/绘制
+3.889ms、呈现1.690ms，无超过16.743ms预算的工作帧。这里自动选择software，
+因为OpenGL设备实际为llvmpipe；结果不保证其他主机/地图相同，也不外推MCU。
+
+## 扩屏回归
 
 真实 ROM + 存档副本回归：
 
@@ -90,6 +119,7 @@ OAM交接，未见超过正常步幅的位置跳变；屋顶9381576个像素检�
 |---|---|
 |`test_core.c`|银行、DMA、调色板、双速与reset冒烟|
 |`test_viewport.c`|尺寸、翻转、银行、原生区与缓冲边界|
+|`test_render_cache.c`|快速图块行与逐像素参考对照、缓存碰撞/失效、逐行颜色更新|
 |`test_sprite_seams.c`|四边补画、原生OBJ保护、颜色快照、预览筛选|
 |`test_silver_roofs.c`、`test_silver_roof_route.c`|合成昼夜/渐暗与实际屋顶往返|
 |`test_silver_viewport.c`|8000帧纯展示双实例对照|

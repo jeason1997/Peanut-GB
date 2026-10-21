@@ -37,8 +37,11 @@ static uint32_t gbc_view_colour(struct gbc_viewport *v,uint8_t p,unsigned x,unsi
      * full atlas search per roof pixel; reset this cache at each frame begin. */
     int tx=wx>=0?wx/8:-((7-wx)/8),ty=wy>=0?wy/8:-((7-wy)/8);
     if(!v->roof_cache_valid||v->roof_cache_x!=tx||v->roof_cache_y!=ty) {
-        uint8_t tile=pgb_silver_world_tile(&v->silver,&v->view,&v->silver.frame_map,wx,wy);
-        v->roof_cache_group=v->roof_tile[tile]?gbc_silver_owner_group(v,wx,wy):0;
+        uint8_t tile=gbc_silver_cached_tile(v,wx,wy);
+        unsigned slot=gbc_silver_cached_cell(v,wx,wy);
+        if(v->roof_tile[tile]&&v->terrain_cache[slot].owner==255)
+            v->terrain_cache[slot].owner=(uint8_t)gbc_silver_owner_group(v,wx,wy);
+        v->roof_cache_group=v->roof_tile[tile]?v->terrain_cache[slot].owner:0;
         v->roof_cache_x=tx;v->roof_cache_y=ty;v->roof_cache_valid=1;
     }
     unsigned group=v->roof_cache_group;
