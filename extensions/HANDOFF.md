@@ -101,3 +101,26 @@ features是工作开关，MAX_*是保留内存；object_limit不是活动AI槽�
 对象不足会截断邻图预览；地图不足可能影响填充稳定；查看 objects_dropped/atlas_truncated。
 更改配置在帧之间调用configure并失效快照。F9/terrain-only只关展示，不关NPC逻辑扩围。
 当前邻图NPC不运行AI，跨地图卸载后不永久保存其位置。
+
+## V3s framebuffer 实机阶段（2026-10-21，未提交）
+
+独立前端为 extensions/gbc/frontend_fb.c，实测与复现见 extensions/gbc/V3S.md。
+不改原核心、GBC固定来源头、examples/test。COM15 115200/8N1，Alpine/musl，
+fb0实查RGB565/stride640/320×240。无input event、无网络，串口传tar并核对SHA256。
+静态ARM构建用Zig arm-linux-musleabihf/cortex_a7，设备测试目录
+/tmp/peanut-gbc-20261021，当前修正版可执行文件peanut-flush，ROM副本silver.gbc，
+存档副本test.sav，默认不写存档。原始ROM和游玩副本哈希保护。
+
+用户指出画面卡顿后，不能只引用模拟59.7FPS：mmap路径经SPI计数仅14.69整屏/s，
+原因是drm_fbdev_shmem默认50ms defio。新前端每帧fsync推动defio，实测59.46整屏/s，
+模拟仍59.7FPS；这不是光学面板FPS。--deferred-fb可对照，无内核/固件改动。
+3200帧真实往返两次成功，0核心错误和调色板不匹配，地图均值run7.264ms
+（draw4.282）、present4.271ms；峰值20.879ms，6个地图帧超预算。
+板端8ms追加预算本次无余量，extra=0，原游戏切图短暂停顿仍可能出现。
+不要把此结果说成板端已复现桌面的完整切图追赶。RTC按墙钟，声音/RTC持久化未实现。
+ASan/UBSan framebuffer格式/stride/offset测试通过。日志/屏幕读回在build-extensions/v3s。
+用户已在整理阶段明确授权提交推送；仅提交保留的前端、串口工具及文档，排除生成文件。
+设备可用串口WASD/Z/X/E/R/Q操作，退出恢复tty1。
+
+2026-10-21：按用户要求撤回后续双缓冲、DRM同步提交和固定节奏版本；
+当前设备恢复 peanut-flush，保留 fbdev 每帧 fsync 修正及 PC 串口工具。

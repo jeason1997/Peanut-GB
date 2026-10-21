@@ -356,3 +356,8 @@ gprof插桩的墙钟时间不能当作性能基准，下面比较使用无插桩
 
 已验证与未验证项目、真实 ROM 指纹和测量环境见 [README.md](README.md)。
 当前通过的是冒烟和部分回归；声音、游戏内存档后重启继续、完整 CGB 时序仍未认证。
+
+## V3s / Linux framebuffer
+
+独立无 SDL 前端、串口控制、构建部署命令及实机数据见 [V3S.md](V3S.md)。
+默认320×240，按 fb ioctl 检查真实位域/stride/offset，运行期间临时接管 tty1。
